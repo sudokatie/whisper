@@ -12,28 +12,54 @@ use uuid::Uuid;
 use crate::identity::{Contact, TrustLevel};
 use crate::message::{Group, Message, MessageContent, MessageStatus, Recipient};
 
-/// SQLite database wrapper.
+/// SQLite database wrapper with SQLCipher encryption.
 pub struct Database {
     conn: Connection,
 }
 
 impl Database {
-    /// Open or create database at path.
-    pub fn open(path: &Path) -> Result<Self> {
+    /// Open or create encrypted database at path.
+    /// 
+    /// The passphrase is used to encrypt the database file using SQLCipher.
+    /// If the database already exists, it will be opened with the passphrase.
+    /// If the passphrase is wrong, an error is returned.
+    pub fn open(path: &Path, passphrase: &str) -> Result<Self> {
         // Create parent directories if needed
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let conn = Connection::open(path)?;
+        
+        // Set the encryption key using SQLCipher PRAGMA
+        // This must be done before any other database operations
+        if !passphrase.is_empty() {
+            conn.pragma_update(None, "key", passphrase)
+                .context("Failed to set encryption key")?;
+        }
+        
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
     }
 
     /// Open an in-memory database (for testing).
+    /// In-memory databases don't need encryption.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        let db = Self { conn };
+        db.migrate()?;
+        Ok(db)
+    }
+    
+    /// Open an encrypted in-memory database (for testing encryption).
+    #[cfg(test)]
+    pub fn open_in_memory_encrypted(passphrase: &str) -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        if !passphrase.is_empty() {
+            conn.pragma_update(None, "key", passphrase)
+                .context("Failed to set encryption key")?;
+        }
         let db = Self { conn };
         db.migrate()?;
         Ok(db)

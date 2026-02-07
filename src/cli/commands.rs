@@ -67,9 +67,9 @@ pub async fn handle_init(data_dir: &Path, passphrase: &str) -> Result<()> {
     // Save keypair
     save_keypair(&keypair, &key_path, passphrase).context("Failed to save keypair")?;
 
-    // Initialize database
+    // Initialize encrypted database
     let db_path = database_path(data_dir);
-    let _db = Database::open(&db_path).context("Failed to initialize database")?;
+    let _db = Database::open(&db_path, passphrase).context("Failed to initialize database")?;
 
     println!("Identity created!");
     println!("Peer ID: {}", peer_id);
@@ -80,11 +80,11 @@ pub async fn handle_init(data_dir: &Path, passphrase: &str) -> Result<()> {
 }
 
 /// Send a message to a contact.
-pub async fn handle_send(alias: &str, message: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_send(alias: &str, message: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     // This would normally connect to the network and send
     // For now, just queue the message
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     // Look up contact
     let contact = db
@@ -98,9 +98,9 @@ pub async fn handle_send(alias: &str, message: &str, data_dir: &Path) -> Result<
 }
 
 /// Start interactive chat with a contact.
-pub async fn handle_chat(alias: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_chat(alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     // Verify contact exists
     let contact = db
@@ -235,9 +235,9 @@ fn run_tui(app: &mut App, db: &Database) -> Result<()> {
 }
 
 /// List all contacts.
-pub async fn handle_contacts(data_dir: &Path) -> Result<()> {
+pub async fn handle_contacts(data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     let contacts = db.list_contacts()?;
 
@@ -261,9 +261,9 @@ pub async fn handle_contacts(data_dir: &Path) -> Result<()> {
 }
 
 /// Add a new contact.
-pub async fn handle_add_contact(alias: &str, peer_id_str: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_add_contact(alias: &str, peer_id_str: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     // Parse peer ID
     let peer_id: PeerId = peer_id_str
@@ -301,7 +301,7 @@ pub async fn handle_status(data_dir: &Path, passphrase: &str) -> Result<()> {
     let public_key = export_public_key(&keypair);
 
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path)?;
+    let db = Database::open(&db_path, passphrase)?;
     let contacts = db.list_contacts()?;
 
     println!("Whisper Status");
@@ -315,9 +315,9 @@ pub async fn handle_status(data_dir: &Path, passphrase: &str) -> Result<()> {
 }
 
 /// Set trust level for a contact.
-pub async fn handle_trust(alias: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_trust(alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path)?;
+    let db = Database::open(&db_path, passphrase)?;
 
     let mut contact = db
         .get_contact_by_alias(alias)?
@@ -332,9 +332,9 @@ pub async fn handle_trust(alias: &str, data_dir: &Path) -> Result<()> {
 }
 
 /// Block a contact.
-pub async fn handle_block(alias: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_block(alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path)?;
+    let db = Database::open(&db_path, passphrase)?;
 
     let mut contact = db
         .get_contact_by_alias(alias)?
@@ -365,9 +365,9 @@ pub async fn handle_export_key(data_dir: &Path, passphrase: &str) -> Result<()> 
 }
 
 /// Import a contact from a key file.
-pub async fn handle_import_contact(file: &Path, alias: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_import_contact(file: &Path, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     // Read public key from file
     let key_data = fs::read_to_string(file).context("Failed to read key file")?;
@@ -417,9 +417,9 @@ pub async fn handle_peers(data_dir: &Path, _passphrase: &str) -> Result<()> {
 }
 
 /// Create a new group.
-pub async fn handle_group_create(name: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_group_create(name: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     // Check if group already exists
     if db.get_group_by_name(name)?.is_some() {
@@ -440,9 +440,9 @@ pub async fn handle_group_create(name: &str, data_dir: &Path) -> Result<()> {
 }
 
 /// Invite a contact to a group.
-pub async fn handle_group_invite(group_name: &str, alias: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_group_invite(group_name: &str, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     // Get group
     let group = db
@@ -463,9 +463,9 @@ pub async fn handle_group_invite(group_name: &str, alias: &str, data_dir: &Path)
 }
 
 /// Open interactive group chat.
-pub async fn handle_group_chat(name: &str, data_dir: &Path) -> Result<()> {
+pub async fn handle_group_chat(name: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     // Verify group exists
     let group = db
@@ -480,9 +480,9 @@ pub async fn handle_group_chat(name: &str, data_dir: &Path) -> Result<()> {
 }
 
 /// List all groups.
-pub async fn handle_group_list(data_dir: &Path) -> Result<()> {
+pub async fn handle_group_list(data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
     let groups = db.list_groups()?;
 
@@ -536,12 +536,12 @@ mod tests {
 
         // Add a contact
         let peer_id = PeerId::random();
-        handle_add_contact("alice", &peer_id.to_string(), data_dir)
+        handle_add_contact("alice", &peer_id.to_string(), data_dir, "test")
             .await
             .unwrap();
 
         // Verify it was added
-        let db = Database::open(&database_path(data_dir)).unwrap();
+        let db = Database::open(&database_path(data_dir), "test").unwrap();
         let contact = db.get_contact_by_alias("alice").unwrap();
         assert!(contact.is_some());
     }
@@ -556,15 +556,15 @@ mod tests {
         let peer1 = PeerId::random();
         let peer2 = PeerId::random();
 
-        handle_add_contact("alice", &peer1.to_string(), data_dir)
+        handle_add_contact("alice", &peer1.to_string(), data_dir, "test")
             .await
             .unwrap();
-        handle_add_contact("bob", &peer2.to_string(), data_dir)
+        handle_add_contact("bob", &peer2.to_string(), data_dir, "test")
             .await
             .unwrap();
 
         // Verify via database
-        let db = Database::open(&database_path(data_dir)).unwrap();
+        let db = Database::open(&database_path(data_dir), "test").unwrap();
         let contacts = db.list_contacts().unwrap();
         assert_eq!(contacts.len(), 2);
     }
@@ -588,13 +588,13 @@ mod tests {
         handle_init(data_dir, "test").await.unwrap();
 
         let peer = PeerId::random();
-        handle_add_contact("alice", &peer.to_string(), data_dir)
+        handle_add_contact("alice", &peer.to_string(), data_dir, "test")
             .await
             .unwrap();
 
-        handle_trust("alice", data_dir).await.unwrap();
+        handle_trust("alice", data_dir, "test").await.unwrap();
 
-        let db = Database::open(&database_path(data_dir)).unwrap();
+        let db = Database::open(&database_path(data_dir), "test").unwrap();
         let contact = db.get_contact_by_alias("alice").unwrap().unwrap();
         assert!(matches!(contact.trust_level, TrustLevel::Trusted));
     }
@@ -607,13 +607,13 @@ mod tests {
         handle_init(data_dir, "test").await.unwrap();
 
         let peer = PeerId::random();
-        handle_add_contact("alice", &peer.to_string(), data_dir)
+        handle_add_contact("alice", &peer.to_string(), data_dir, "test")
             .await
             .unwrap();
 
-        handle_block("alice", data_dir).await.unwrap();
+        handle_block("alice", data_dir, "test").await.unwrap();
 
-        let db = Database::open(&database_path(data_dir)).unwrap();
+        let db = Database::open(&database_path(data_dir), "test").unwrap();
         let contact = db.get_contact_by_alias("alice").unwrap().unwrap();
         assert!(matches!(contact.trust_level, TrustLevel::Blocked));
     }
@@ -638,7 +638,7 @@ mod tests {
         handle_init(data_dir, "test").await.unwrap();
 
         // Try to send to non-existent contact
-        let result = handle_send("nobody", "hello", data_dir).await;
+        let result = handle_send("nobody", "hello", data_dir, "test").await;
         assert!(result.is_err());
     }
 
@@ -668,9 +668,9 @@ mod tests {
         let data_dir = temp.path();
 
         handle_init(data_dir, "test").await.unwrap();
-        handle_group_create("test-group", data_dir).await.unwrap();
+        handle_group_create("test-group", data_dir, "test").await.unwrap();
 
-        let db = Database::open(&database_path(data_dir)).unwrap();
+        let db = Database::open(&database_path(data_dir), "test").unwrap();
         let group = db.get_group_by_name("test-group").unwrap();
         assert!(group.is_some());
     }
@@ -681,9 +681,9 @@ mod tests {
         let data_dir = temp.path();
 
         handle_init(data_dir, "test").await.unwrap();
-        handle_group_create("my-group", data_dir).await.unwrap();
+        handle_group_create("my-group", data_dir, "test").await.unwrap();
 
-        let result = handle_group_create("my-group", data_dir).await;
+        let result = handle_group_create("my-group", data_dir, "test").await;
         assert!(result.is_err());
     }
 
@@ -693,16 +693,16 @@ mod tests {
         let data_dir = temp.path();
 
         handle_init(data_dir, "test").await.unwrap();
-        handle_group_create("team", data_dir).await.unwrap();
+        handle_group_create("team", data_dir, "test").await.unwrap();
 
         let peer = PeerId::random();
-        handle_add_contact("alice", &peer.to_string(), data_dir)
+        handle_add_contact("alice", &peer.to_string(), data_dir, "test")
             .await
             .unwrap();
 
-        handle_group_invite("team", "alice", data_dir).await.unwrap();
+        handle_group_invite("team", "alice", data_dir, "test").await.unwrap();
 
-        let db = Database::open(&database_path(data_dir)).unwrap();
+        let db = Database::open(&database_path(data_dir), "test").unwrap();
         let group = db.get_group_by_name("team").unwrap().unwrap();
         assert_eq!(group.members.len(), 1);
     }
@@ -715,11 +715,11 @@ mod tests {
         handle_init(data_dir, "test").await.unwrap();
 
         let peer = PeerId::random();
-        handle_add_contact("alice", &peer.to_string(), data_dir)
+        handle_add_contact("alice", &peer.to_string(), data_dir, "test")
             .await
             .unwrap();
 
-        let result = handle_group_invite("nonexistent", "alice", data_dir).await;
+        let result = handle_group_invite("nonexistent", "alice", data_dir, "test").await;
         assert!(result.is_err());
     }
 
@@ -729,11 +729,11 @@ mod tests {
         let data_dir = temp.path();
 
         handle_init(data_dir, "test").await.unwrap();
-        handle_group_create("group1", data_dir).await.unwrap();
-        handle_group_create("group2", data_dir).await.unwrap();
+        handle_group_create("group1", data_dir, "test").await.unwrap();
+        handle_group_create("group2", data_dir, "test").await.unwrap();
 
         // Should not error
-        handle_group_list(data_dir).await.unwrap();
+        handle_group_list(data_dir, "test").await.unwrap();
     }
 
     #[tokio::test]

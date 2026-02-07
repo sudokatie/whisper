@@ -146,25 +146,25 @@ async fn main() -> Result<()> {
             cli::handle_export_key(&data_dir, &passphrase).await?;
         }
         Commands::ImportContact { file, alias } => {
-            cli::handle_import_contact(&file, &alias, &data_dir).await?;
+            cli::handle_import_contact(&file, &alias, &data_dir, &passphrase).await?;
         }
         Commands::Send { alias, message } => {
-            cli::handle_send(&alias, &message, &data_dir).await?;
+            cli::handle_send(&alias, &message, &data_dir, &passphrase).await?;
         }
         Commands::Chat { alias } => {
-            cli::handle_chat(&alias, &data_dir).await?;
+            cli::handle_chat(&alias, &data_dir, &passphrase).await?;
         }
         Commands::Contacts => {
-            cli::handle_contacts(&data_dir).await?;
+            cli::handle_contacts(&data_dir, &passphrase).await?;
         }
         Commands::Add { alias, peer_id } => {
-            cli::handle_add_contact(&alias, &peer_id, &data_dir).await?;
+            cli::handle_add_contact(&alias, &peer_id, &data_dir, &passphrase).await?;
         }
         Commands::Trust { alias } => {
-            cli::handle_trust(&alias, &data_dir).await?;
+            cli::handle_trust(&alias, &data_dir, &passphrase).await?;
         }
         Commands::Block { alias } => {
-            cli::handle_block(&alias, &data_dir).await?;
+            cli::handle_block(&alias, &data_dir, &passphrase).await?;
         }
         Commands::Status => {
             cli::handle_status(&data_dir, &passphrase).await?;
@@ -175,16 +175,16 @@ async fn main() -> Result<()> {
         Commands::Group(cmd) => {
             match cmd {
                 GroupCommands::Create { name } => {
-                    cli::handle_group_create(&name, &data_dir).await?;
+                    cli::handle_group_create(&name, &data_dir, &passphrase).await?;
                 }
                 GroupCommands::Invite { name, alias } => {
-                    cli::handle_group_invite(&name, &alias, &data_dir).await?;
+                    cli::handle_group_invite(&name, &alias, &data_dir, &passphrase).await?;
                 }
                 GroupCommands::Chat { name } => {
-                    cli::handle_group_chat(&name, &data_dir).await?;
+                    cli::handle_group_chat(&name, &data_dir, &passphrase).await?;
                 }
                 GroupCommands::List => {
-                    cli::handle_group_list(&data_dir).await?;
+                    cli::handle_group_list(&data_dir, &passphrase).await?;
                 }
             }
         }

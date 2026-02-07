@@ -39,12 +39,12 @@ async fn add_contact_and_list() {
 
     // Add contact
     let peer = PeerId::random();
-    cli::handle_add_contact("alice", &peer.to_string(), data_dir)
+    cli::handle_add_contact("alice", &peer.to_string(), data_dir, "test")
         .await
         .unwrap();
 
     // Verify via database
-    let db = Database::open(&data_dir.join("whisper.db")).unwrap();
+    let db = Database::open(&data_dir.join("whisper.db"), "test").unwrap();
     let contacts = db.list_contacts().unwrap();
 
     assert_eq!(contacts.len(), 1);
@@ -76,7 +76,7 @@ async fn store_message_in_db() {
     let temp = TempDir::new().unwrap();
     let db_path = temp.path().join("test.db");
 
-    let db = Database::open(&db_path).unwrap();
+    let db = Database::open(&db_path, "test").unwrap();
 
     // Create and store message
     let from = PeerId::random();
@@ -121,22 +121,22 @@ async fn multiple_contacts_trust_levels() {
     let peer2 = PeerId::random();
     let peer3 = PeerId::random();
 
-    cli::handle_add_contact("alice", &peer1.to_string(), data_dir)
+    cli::handle_add_contact("alice", &peer1.to_string(), data_dir, "test")
         .await
         .unwrap();
-    cli::handle_add_contact("bob", &peer2.to_string(), data_dir)
+    cli::handle_add_contact("bob", &peer2.to_string(), data_dir, "test")
         .await
         .unwrap();
-    cli::handle_add_contact("eve", &peer3.to_string(), data_dir)
+    cli::handle_add_contact("eve", &peer3.to_string(), data_dir, "test")
         .await
         .unwrap();
 
     // Set different trust levels
-    cli::handle_trust("alice", data_dir).await.unwrap();
-    cli::handle_block("eve", data_dir).await.unwrap();
+    cli::handle_trust("alice", data_dir, "test").await.unwrap();
+    cli::handle_block("eve", data_dir, "test").await.unwrap();
 
     // Verify
-    let db = Database::open(&data_dir.join("whisper.db")).unwrap();
+    let db = Database::open(&data_dir.join("whisper.db"), "test").unwrap();
 
     let alice = db.get_contact_by_alias("alice").unwrap().unwrap();
     let bob = db.get_contact_by_alias("bob").unwrap().unwrap();
@@ -225,10 +225,10 @@ async fn status_with_identity() {
     cli::handle_init(data_dir, "test").await.unwrap();
 
     // Add some contacts
-    cli::handle_add_contact("alice", &PeerId::random().to_string(), data_dir)
+    cli::handle_add_contact("alice", &PeerId::random().to_string(), data_dir, "test")
         .await
         .unwrap();
-    cli::handle_add_contact("bob", &PeerId::random().to_string(), data_dir)
+    cli::handle_add_contact("bob", &PeerId::random().to_string(), data_dir, "test")
         .await
         .unwrap();
 
