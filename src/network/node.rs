@@ -1,16 +1,14 @@
 //! Main P2P node.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use libp2p::{
     identity::Keypair,
-    noise, relay,
-    swarm::SwarmEvent,
+    noise,
     tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use std::collections::HashSet;
-use tokio::sync::mpsc;
 
-use super::behaviour::{MessageRequest, MessageResponse, WhisperBehaviour, WhisperEvent};
+use super::behaviour::{MessageRequest, WhisperBehaviour};
 
 /// The main Whisper network node.
 pub struct WhisperNode {

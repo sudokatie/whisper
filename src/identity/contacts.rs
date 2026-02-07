@@ -97,7 +97,7 @@ impl ContactStore {
     pub fn is_blocked(&self, peer_id: &PeerId) -> bool {
         self.contacts
             .get(peer_id)
-            .map_or(false, |c| c.trust_level == TrustLevel::Blocked)
+            .is_some_and(|c| c.trust_level == TrustLevel::Blocked)
     }
 
     /// Get count of contacts.

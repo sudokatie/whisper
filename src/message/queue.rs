@@ -47,7 +47,7 @@ impl MessageQueue {
 
         self.pending
             .entry(peer_id)
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(message);
     }
 

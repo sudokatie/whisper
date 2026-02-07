@@ -6,8 +6,7 @@ use anyhow::{Context, Result};
 use libp2p::PeerId;
 
 use crate::identity::{
-    export_public_key, generate_keypair, keypair_to_peer_id, load_keypair, save_keypair, Contact,
-    ContactStore, TrustLevel,
+    export_public_key, generate_keypair, keypair_to_peer_id, load_keypair, save_keypair, Contact, TrustLevel,
 };
 use crate::storage::Database;
 
