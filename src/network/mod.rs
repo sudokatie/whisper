@@ -14,7 +14,7 @@ pub use discovery::{
     extract_peer_id, ipfs_bootstrap_nodes, is_local_address, start_peer_discovery,
     KAD_QUERY_TIMEOUT_SECS, KAD_REPLICATION_FACTOR, MDNS_QUERY_INTERVAL_SECS,
 };
-pub use node::WhisperNode;
+pub use node::{NodeEvent, WhisperNode};
 pub use relay::{
     connect_to_relay, is_behind_nat, is_relay_address, make_relay_address, public_relays,
     RELAY_CONNECT_TIMEOUT_SECS,

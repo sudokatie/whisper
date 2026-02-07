@@ -3,12 +3,29 @@
 use anyhow::Result;
 use libp2p::{
     identity::Keypair,
-    noise,
+    mdns, noise, request_response,
+    swarm::SwarmEvent,
     tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use std::collections::HashSet;
+use tokio::sync::mpsc;
 
-use super::behaviour::{MessageRequest, WhisperBehaviour};
+use super::behaviour::{MessageRequest, MessageResponse, WhisperBehaviour, WhisperBehaviourEvent};
+
+/// Events emitted by the network node.
+#[derive(Debug, Clone)]
+pub enum NodeEvent {
+    /// A peer connected.
+    PeerConnected(PeerId),
+    /// A peer disconnected.
+    PeerDisconnected(PeerId),
+    /// A message was received from a peer.
+    MessageReceived { from: PeerId, data: Vec<u8> },
+    /// A message was sent successfully.
+    MessageSent { to: PeerId },
+    /// Listening on an address.
+    Listening(Multiaddr),
+}
 
 /// The main Whisper network node.
 pub struct WhisperNode {
@@ -132,6 +149,104 @@ impl WhisperNode {
     /// Get mutable swarm for advanced operations.
     pub fn swarm_mut(&mut self) -> &mut Swarm<WhisperBehaviour> {
         &mut self.swarm
+    }
+
+    /// Mark a peer as connected.
+    pub fn add_connected_peer(&mut self, peer_id: PeerId) {
+        self.connected_peers.insert(peer_id);
+        self.flush_pending(&peer_id);
+    }
+
+    /// Mark a peer as disconnected.
+    pub fn remove_connected_peer(&mut self, peer_id: &PeerId) {
+        self.connected_peers.remove(peer_id);
+    }
+
+    /// Poll the swarm for events and return any node events.
+    /// This should be called in a loop from the main event handler.
+    pub async fn poll_event(&mut self) -> Option<NodeEvent> {
+        use futures::StreamExt;
+
+        loop {
+            match self.swarm.select_next_some().await {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    return Some(NodeEvent::Listening(address));
+                }
+                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                    self.add_connected_peer(peer_id);
+                    return Some(NodeEvent::PeerConnected(peer_id));
+                }
+                SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    self.remove_connected_peer(&peer_id);
+                    return Some(NodeEvent::PeerDisconnected(peer_id));
+                }
+                SwarmEvent::Behaviour(event) => {
+                    if let Some(node_event) = self.handle_behaviour_event(event) {
+                        return Some(node_event);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Handle a behaviour event and return any resulting node event.
+    fn handle_behaviour_event(&mut self, event: WhisperBehaviourEvent) -> Option<NodeEvent> {
+        match event {
+            WhisperBehaviourEvent::Mdns(mdns::Event::Discovered(peers)) => {
+                for (peer_id, addr) in peers {
+                    // Add discovered peer to Kademlia
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                    // Try to dial them
+                    let _ = self.swarm.dial(addr);
+                }
+                None
+            }
+            WhisperBehaviourEvent::Mdns(mdns::Event::Expired(peers)) => {
+                for (peer_id, _) in peers {
+                    self.remove_connected_peer(&peer_id);
+                }
+                None
+            }
+            WhisperBehaviourEvent::RequestResponse(request_response::Event::Message {
+                peer,
+                message,
+            }) => {
+                match message {
+                    request_response::Message::Request { request, channel, .. } => {
+                        // Received a message - send acknowledgment
+                        let _ = self.swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_response(channel, MessageResponse(true));
+                        Some(NodeEvent::MessageReceived {
+                            from: peer,
+                            data: request.0,
+                        })
+                    }
+                    request_response::Message::Response { .. } => {
+                        Some(NodeEvent::MessageSent { to: peer })
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Start listening on the default address and return the channel for events.
+    #[allow(dead_code)]
+    pub async fn start(&mut self) -> Result<mpsc::Receiver<NodeEvent>> {
+        // Listen on all interfaces
+        let addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()?;
+        self.listen_on(addr)?;
+
+        // Create event channel (tx would be used in a spawned event loop)
+        let (_tx, rx) = mpsc::channel(100);
+
+        Ok(rx)
     }
 }
 

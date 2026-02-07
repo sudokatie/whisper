@@ -3,6 +3,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -18,6 +19,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     Terminal,
 };
+use tokio::sync::Mutex;
 
 use crate::crypto::generate_group_key;
 use crate::identity::{
@@ -25,6 +27,7 @@ use crate::identity::{
     save_keypair, Contact, TrustLevel,
 };
 use crate::message::{Group, Message, MessageContent, Recipient};
+use crate::network::{NodeEvent, WhisperNode};
 use crate::storage::Database;
 use crate::ui::{
     App, AppMode, DisplayMessage, InputAction,
@@ -102,6 +105,14 @@ pub async fn handle_chat(alias: &str, data_dir: &Path, passphrase: &str) -> Resu
     let db_path = database_path(data_dir);
     let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    if !key_path.exists() {
+        anyhow::bail!("No identity found. Run: whisper init");
+    }
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let our_peer_id = keypair_to_peer_id(&keypair);
+
     // Verify contact exists
     let contact = db
         .get_contact_by_alias(alias)?
@@ -112,6 +123,7 @@ pub async fn handle_chat(alias: &str, data_dir: &Path, passphrase: &str) -> Resu
 
     // Create app state
     let mut app = App::new();
+    app.set_peer_id(our_peer_id);
     for c in contacts {
         app.add_contact(c);
     }
@@ -129,7 +141,7 @@ pub async fn handle_chat(alias: &str, data_dir: &Path, passphrase: &str) -> Resu
     let messages = db.get_messages_with_peer(&contact.peer_id, 100)?;
     for msg in messages {
         if let MessageContent::Text(text) = msg.content {
-            let is_ours = app.our_peer_id == Some(msg.from);
+            let is_ours = our_peer_id == msg.from;
             app.messages.push(DisplayMessage::new(
                 msg.from,
                 text,
@@ -139,20 +151,36 @@ pub async fn handle_chat(alias: &str, data_dir: &Path, passphrase: &str) -> Resu
         }
     }
 
-    // Run the TUI
-    run_tui(&mut app, &db)?;
+    // Create and start the network node
+    let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
+    
+    // Listen on a random port
+    node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    
+    // Share the node for the TUI to send messages
+    let node = Arc::new(Mutex::new(node));
+
+    // Run the TUI with network integration
+    run_tui_with_network(&mut app, &db, node).await?;
 
     Ok(())
 }
 
-/// Run the TUI event loop.
-fn run_tui(app: &mut App, db: &Database) -> Result<()> {
+/// Run the TUI event loop with network integration.
+async fn run_tui_with_network(
+    app: &mut App,
+    db: &Database,
+    node: Arc<Mutex<WhisperNode>>,
+) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Track connected peers for status bar
+    let mut connected_count = 0usize;
 
     // Main loop
     loop {
@@ -182,13 +210,13 @@ fn run_tui(app: &mut App, db: &Database) -> Result<()> {
                 }
             }
 
-            // Status bar
+            // Status bar with connected peer count
             let peer_id = app.our_peer_id.unwrap_or_else(PeerId::random);
-            render_status(frame, chunks[1], &peer_id, 0);
+            render_status(frame, chunks[1], &peer_id, connected_count);
         })?;
 
-        // Handle input
-        if event::poll(Duration::from_millis(100))? {
+        // Poll for keyboard input (non-blocking)
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 let action = app.handle_key(key);
 
@@ -206,6 +234,14 @@ fn run_tui(app: &mut App, db: &Database) -> Result<()> {
                             // Store in database
                             let _ = db.insert_message(&msg);
 
+                            // Send over network
+                            {
+                                let mut node = node.lock().await;
+                                // Serialize message content for network
+                                let data = text.as_bytes().to_vec();
+                                node.send_message(peer_id, data);
+                            }
+
                             // Add to display
                             app.messages.push(DisplayMessage::new(
                                 from,
@@ -221,6 +257,61 @@ fn run_tui(app: &mut App, db: &Database) -> Result<()> {
 
                 if app.should_quit {
                     break;
+                }
+            }
+        }
+
+        // Poll network for events (with timeout so we don't block)
+        {
+            let mut node = node.lock().await;
+            // Use tokio::select with a timeout to poll network without blocking
+            let poll_result = tokio::time::timeout(
+                Duration::from_millis(10),
+                node.poll_event()
+            ).await;
+
+            if let Ok(Some(event)) = poll_result {
+                match event {
+                    NodeEvent::PeerConnected(peer_id) => {
+                        connected_count += 1;
+                        // Update last_seen for this contact if we have them
+                        if let Ok(Some(mut contact)) = db.get_contact(&peer_id) {
+                            contact.last_seen = Some(Utc::now());
+                            let _ = db.upsert_contact(&contact);
+                        }
+                    }
+                    NodeEvent::PeerDisconnected(_) => {
+                        connected_count = connected_count.saturating_sub(1);
+                    }
+                    NodeEvent::MessageReceived { from, data } => {
+                        // Convert bytes to text
+                        if let Ok(text) = String::from_utf8(data) {
+                            // Store in database
+                            let msg = Message::new_text(
+                                from,
+                                Recipient::Direct(app.our_peer_id.unwrap_or_else(PeerId::random)),
+                                text.clone(),
+                            );
+                            let _ = db.insert_message(&msg);
+
+                            // Add to display if it's from current chat
+                            if app.current_chat == Some(from) {
+                                app.messages.push(DisplayMessage::new(
+                                    from,
+                                    text,
+                                    Utc::now(),
+                                    false,
+                                ));
+                            }
+                        }
+                    }
+                    NodeEvent::Listening(addr) => {
+                        // Could display this somewhere
+                        let _ = addr;
+                    }
+                    NodeEvent::MessageSent { .. } => {
+                        // Message confirmed sent
+                    }
                 }
             }
         }
@@ -467,14 +558,50 @@ pub async fn handle_group_chat(name: &str, data_dir: &Path, passphrase: &str) ->
     let db_path = database_path(data_dir);
     let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
 
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    if !key_path.exists() {
+        anyhow::bail!("No identity found. Run: whisper init");
+    }
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let our_peer_id = keypair_to_peer_id(&keypair);
+
     // Verify group exists
     let group = db
         .get_group_by_name(name)?
         .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", name))?;
 
-    println!("Group: {} ({} members)", group.name, group.members.len());
-    println!("Interactive group chat not yet implemented");
-    println!("Use 'whisper send <member-alias> <message>' for now");
+    if group.members.is_empty() {
+        println!("Group '{}' has no members. Invite contacts with: whisper group invite {} <alias>", name, name);
+        return Ok(());
+    }
+
+    // Load all contacts for the sidebar
+    let contacts = db.list_contacts()?;
+
+    // Create app state
+    let mut app = App::new();
+    app.set_peer_id(our_peer_id);
+    for c in contacts {
+        app.add_contact(c);
+    }
+
+    // Set mode to chat (using first group member as "current chat" for display purposes)
+    // In a real implementation, we'd have a separate group chat mode
+    if let Some(first_member) = group.members.first() {
+        app.current_chat = Some(*first_member);
+    }
+    app.mode = AppMode::Chat;
+
+    // Create and start the network node
+    let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
+    node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    let node = Arc::new(Mutex::new(node));
+
+    // Run the TUI with network integration
+    // Note: For groups, messages should be sent to all members
+    // This is a simplified version - full implementation would use group encryption
+    run_tui_with_network(&mut app, &db, node).await?;
 
     Ok(())
 }
