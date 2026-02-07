@@ -183,9 +183,9 @@ impl App {
     pub fn handle_message(&mut self, msg: DisplayMessage) {
         // Add to messages if it's for the current chat
         if let Some(current) = &self.current_chat {
-            let is_relevant = (msg.is_ours && *current == msg.from)
-                || (!msg.is_ours && *current == msg.from);
-            if is_relevant || (msg.is_ours && self.our_peer_id.as_ref() == Some(&msg.from)) {
+            // Message is relevant if it's from/to the current peer
+            let is_relevant = *current == msg.from;
+            if is_relevant {
                 self.messages.push(msg);
             }
         }
