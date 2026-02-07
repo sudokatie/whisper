@@ -1,6 +1,5 @@
 //! Offline message queue.
 
-use anyhow::Result;
 use libp2p::PeerId;
 use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
