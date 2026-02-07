@@ -91,6 +91,8 @@ impl WhisperNode {
     }
 
     /// Flush pending messages for a newly connected peer.
+    /// Called when peer connects (in event loop, not yet implemented).
+    #[allow(dead_code)]
     fn flush_pending(&mut self, peer_id: &PeerId) {
         let to_send: Vec<_> = self
             .pending_sends

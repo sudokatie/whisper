@@ -13,7 +13,8 @@ use crate::storage::Database;
 pub struct MessageQueue {
     /// Pending messages by peer.
     pending: HashMap<PeerId, VecDeque<Message>>,
-    /// Database for persistence.
+    /// Database for persistence (used in future for loading on startup).
+    #[allow(dead_code)]
     db: Option<Database>,
 }
 
