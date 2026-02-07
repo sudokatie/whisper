@@ -7,23 +7,29 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use whisper::cli;
+
 /// Decentralized peer-to-peer messaging.
 #[derive(Parser)]
 #[command(name = "whisper")]
 #[command(author = "Katie")]
-#[command(version)]
+#[command(version = "0.1.0")]
 #[command(about = "Decentralized P2P messaging. No servers. No tracking.")]
-struct Cli {
+pub struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    pub command: Commands,
 
     /// Data directory for keys and messages
     #[arg(long, default_value = "~/.whisper")]
-    data_dir: PathBuf,
+    pub data_dir: PathBuf,
+
+    /// Passphrase for keypair encryption (or set WHISPER_PASSPHRASE)
+    #[arg(long, env = "WHISPER_PASSPHRASE", default_value = "")]
+    pub passphrase: String,
 }
 
-#[derive(Subcommand)]
-enum Commands {
+#[derive(Subcommand, Debug, Clone)]
+pub enum Commands {
     /// Initialize a new identity
     Init,
 
@@ -68,56 +74,90 @@ enum Commands {
     Status,
 }
 
+/// Expand ~ to home directory.
+pub fn expand_data_dir(path: PathBuf) -> PathBuf {
+    if path.starts_with("~") {
+        dirs::home_dir()
+            .expect("Could not find home directory")
+            .join(path.strip_prefix("~").unwrap())
+    } else {
+        path
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-
-    // Expand ~ in data_dir
-    let data_dir = if cli.data_dir.starts_with("~") {
-        dirs::home_dir()
-            .expect("Could not find home directory")
-            .join(cli.data_dir.strip_prefix("~").unwrap())
-    } else {
-        cli.data_dir
-    };
+    let data_dir = expand_data_dir(cli.data_dir);
+    let passphrase = cli.passphrase;
 
     match cli.command {
         Commands::Init => {
-            println!("Initializing new identity in {:?}...", data_dir);
-            // TODO: Implement init
+            cli::handle_init(&data_dir, &passphrase).await?;
         }
         Commands::Send { alias, message } => {
-            println!("Sending to {}: {}", alias, message);
-            // TODO: Implement send
+            cli::handle_send(&alias, &message, &data_dir).await?;
         }
         Commands::Chat { alias } => {
-            println!("Opening chat with {}...", alias);
-            // TODO: Implement chat
+            cli::handle_chat(&alias, &data_dir).await?;
         }
         Commands::Contacts => {
-            println!("Contacts:");
-            // TODO: Implement contacts list
+            cli::handle_contacts(&data_dir).await?;
         }
         Commands::Add { alias, peer_id } => {
-            println!("Adding contact {} with peer ID {}", alias, peer_id);
-            // TODO: Implement add contact
+            cli::handle_add_contact(&alias, &peer_id, &data_dir).await?;
         }
         Commands::Trust { alias } => {
-            println!("Marking {} as trusted", alias);
-            // TODO: Implement trust
+            cli::handle_trust(&alias, &data_dir).await?;
         }
         Commands::Block { alias } => {
-            println!("Blocking {}", alias);
-            // TODO: Implement block
+            cli::handle_block(&alias, &data_dir).await?;
         }
         Commands::Status => {
-            println!("Network status:");
-            // TODO: Implement status
+            cli::handle_status(&data_dir, &passphrase).await?;
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_parses_init() {
+        let cli = Cli::parse_from(["whisper", "init"]);
+        assert!(matches!(cli.command, Commands::Init));
+    }
+
+    #[test]
+    fn cli_parses_send() {
+        let cli = Cli::parse_from(["whisper", "send", "alice", "hello"]);
+        match cli.command {
+            Commands::Send { alias, message } => {
+                assert_eq!(alias, "alice");
+                assert_eq!(message, "hello");
+            }
+            _ => panic!("Expected Send command"),
+        }
+    }
+
+    #[test]
+    fn cli_help_works() {
+        // Just verify the command can be built
+        let cmd = Cli::command();
+        assert!(cmd.get_about().is_some());
+    }
+
+    #[test]
+    fn cli_version_works() {
+        let cmd = Cli::command();
+        assert!(cmd.get_version().is_some());
+        assert_eq!(cmd.get_version().unwrap(), "0.1.0");
+    }
 }
