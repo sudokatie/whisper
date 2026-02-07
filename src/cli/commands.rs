@@ -1,18 +1,35 @@
 //! CLI command implementations.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
+use crossterm::{
+    event::{self, Event},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use libp2p::PeerId;
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    Terminal,
+};
 
 use crate::crypto::generate_group_key;
 use crate::identity::{
     export_public_key, generate_keypair, import_public_key, keypair_to_peer_id, load_keypair,
     save_keypair, Contact, TrustLevel,
 };
-use crate::message::Group;
+use crate::message::{Group, Message, MessageContent, Recipient};
 use crate::storage::Database;
+use crate::ui::{
+    App, AppMode, DisplayMessage, InputAction,
+    render_chat, render_contacts, render_empty, render_status,
+};
 
 /// Default keypair filename.
 pub const KEYPAIR_FILE: &str = "identity.key";
@@ -81,10 +98,139 @@ pub async fn handle_send(alias: &str, message: &str, data_dir: &Path) -> Result<
 }
 
 /// Start interactive chat with a contact.
-pub async fn handle_chat(_alias: &str, _data_dir: &Path) -> Result<()> {
-    // This would launch the TUI
-    println!("Interactive chat not yet implemented");
-    println!("Use 'whisper send <alias> <message>' for now");
+pub async fn handle_chat(alias: &str, data_dir: &Path) -> Result<()> {
+    let db_path = database_path(data_dir);
+    let db = Database::open(&db_path).context("Failed to open database")?;
+
+    // Verify contact exists
+    let contact = db
+        .get_contact_by_alias(alias)?
+        .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
+
+    // Load all contacts for the sidebar
+    let contacts = db.list_contacts()?;
+
+    // Create app state
+    let mut app = App::new();
+    for c in contacts {
+        app.add_contact(c);
+    }
+
+    // Set current chat to the specified contact
+    app.current_chat = Some(contact.peer_id);
+    app.mode = AppMode::Chat;
+
+    // Find the contact index for selection
+    if let Some(idx) = app.contacts.iter().position(|c| c.peer_id == contact.peer_id) {
+        app.selected_contact = idx;
+    }
+
+    // Load message history
+    let messages = db.get_messages_with_peer(&contact.peer_id, 100)?;
+    for msg in messages {
+        if let MessageContent::Text(text) = msg.content {
+            let is_ours = app.our_peer_id == Some(msg.from);
+            app.messages.push(DisplayMessage::new(
+                msg.from,
+                text,
+                msg.timestamp,
+                is_ours,
+            ));
+        }
+    }
+
+    // Run the TUI
+    run_tui(&mut app, &db)?;
+
+    Ok(())
+}
+
+/// Run the TUI event loop.
+fn run_tui(app: &mut App, db: &Database) -> Result<()> {
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Main loop
+    loop {
+        // Draw
+        terminal.draw(|frame| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(3)])
+                .split(frame.area());
+
+            match app.mode {
+                AppMode::Contacts => {
+                    if app.contacts.is_empty() {
+                        render_empty(frame, chunks[0], "No contacts. Add with: whisper add <alias> <peer_id>");
+                    } else {
+                        render_contacts(frame, chunks[0], &app.contacts, app.selected_contact);
+                    }
+                }
+                AppMode::Chat | AppMode::Input => {
+                    render_chat(
+                        frame,
+                        chunks[0],
+                        &app.messages,
+                        &app.input,
+                        app.mode == AppMode::Input,
+                    );
+                }
+            }
+
+            // Status bar
+            let peer_id = app.our_peer_id.unwrap_or_else(PeerId::random);
+            render_status(frame, chunks[1], &peer_id, 0);
+        })?;
+
+        // Handle input
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                let action = app.handle_key(key);
+
+                match action {
+                    InputAction::Send(text) => {
+                        if let Some(peer_id) = app.current_chat {
+                            // Create and store message
+                            let from = app.our_peer_id.unwrap_or_else(PeerId::random);
+                            let msg = Message::new_text(
+                                from,
+                                Recipient::Direct(peer_id),
+                                text.clone(),
+                            );
+
+                            // Store in database
+                            let _ = db.insert_message(&msg);
+
+                            // Add to display
+                            app.messages.push(DisplayMessage::new(
+                                from,
+                                text,
+                                Utc::now(),
+                                true,
+                            ));
+                        }
+                    }
+                    InputAction::Cancel => {}
+                    InputAction::None => {}
+                }
+
+                if app.should_quit {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
     Ok(())
 }
 
