@@ -1,7 +1,8 @@
-//! Message types and handling.
+//! Message handling - types, queue, and sync.
 
 mod queue;
 mod sync;
 mod types;
 
-pub use types::{Message, MessageContent, MessageStatus, Recipient};
+pub use queue::MessageQueue;
+pub use types::{Message, MessageContent, MessageStatus, Recipient, ReceiptType};
