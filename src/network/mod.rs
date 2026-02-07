@@ -15,3 +15,7 @@ pub use discovery::{
     KAD_QUERY_TIMEOUT_SECS, KAD_REPLICATION_FACTOR, MDNS_QUERY_INTERVAL_SECS,
 };
 pub use node::WhisperNode;
+pub use relay::{
+    connect_to_relay, is_behind_nat, is_relay_address, make_relay_address, public_relays,
+    RELAY_CONNECT_TIMEOUT_SECS,
+};
