@@ -1,13 +1,17 @@
 //! CLI command implementations.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use libp2p::PeerId;
 
+use crate::crypto::generate_group_key;
 use crate::identity::{
-    export_public_key, generate_keypair, keypair_to_peer_id, load_keypair, save_keypair, Contact, TrustLevel,
+    export_public_key, generate_keypair, import_public_key, keypair_to_peer_id, load_keypair,
+    save_keypair, Contact, TrustLevel,
 };
+use crate::message::Group;
 use crate::storage::Database;
 
 /// Default keypair filename.
@@ -198,6 +202,157 @@ pub async fn handle_block(alias: &str, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Export public key to stdout.
+pub async fn handle_export_key(data_dir: &Path, passphrase: &str) -> Result<()> {
+    let key_path = keypair_path(data_dir);
+
+    if !key_path.exists() {
+        anyhow::bail!("No identity found. Run: whisper init");
+    }
+
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let public_key = export_public_key(&keypair);
+
+    println!("{}", public_key);
+
+    Ok(())
+}
+
+/// Import a contact from a key file.
+pub async fn handle_import_contact(file: &Path, alias: &str, data_dir: &Path) -> Result<()> {
+    let db_path = database_path(data_dir);
+    let db = Database::open(&db_path).context("Failed to open database")?;
+
+    // Read public key from file
+    let key_data = fs::read_to_string(file).context("Failed to read key file")?;
+    let key_data = key_data.trim();
+
+    // Parse public key and derive peer ID
+    let public_key = import_public_key(key_data).context("Invalid public key format")?;
+    let peer_id = PeerId::from(public_key.clone());
+    let key_bytes = public_key.encode_protobuf();
+
+    // Create contact
+    let contact = Contact {
+        peer_id,
+        alias: alias.to_string(),
+        public_key: key_bytes,
+        trust_level: TrustLevel::Unknown,
+        last_seen: None,
+    };
+
+    db.upsert_contact(&contact)?;
+
+    println!("Imported contact: {} ({})", alias, peer_id);
+
+    Ok(())
+}
+
+/// List connected peers.
+pub async fn handle_peers(data_dir: &Path, _passphrase: &str) -> Result<()> {
+    let key_path = keypair_path(data_dir);
+
+    if !key_path.exists() {
+        anyhow::bail!("No identity found. Run: whisper init");
+    }
+
+    // In a real implementation, this would connect to the network
+    // and list currently connected peers
+    println!("Connected Peers");
+    println!("===============");
+    println!("(Not connected - network features not fully implemented)");
+    println!();
+    println!("To connect, the node would need to be running with:");
+    println!("  whisper chat <alias>");
+    println!();
+    println!("Hint: Known contacts can be listed with: whisper contacts");
+
+    Ok(())
+}
+
+/// Create a new group.
+pub async fn handle_group_create(name: &str, data_dir: &Path) -> Result<()> {
+    let db_path = database_path(data_dir);
+    let db = Database::open(&db_path).context("Failed to open database")?;
+
+    // Check if group already exists
+    if db.get_group_by_name(name)?.is_some() {
+        anyhow::bail!("Group '{}' already exists", name);
+    }
+
+    // Generate symmetric key for group
+    let symmetric_key = generate_group_key();
+
+    // Create group
+    let group = Group::new(name.to_string(), symmetric_key);
+    db.create_group(&group)?;
+
+    println!("Created group: {}", name);
+    println!("Group ID: {}", group.id);
+
+    Ok(())
+}
+
+/// Invite a contact to a group.
+pub async fn handle_group_invite(group_name: &str, alias: &str, data_dir: &Path) -> Result<()> {
+    let db_path = database_path(data_dir);
+    let db = Database::open(&db_path).context("Failed to open database")?;
+
+    // Get group
+    let group = db
+        .get_group_by_name(group_name)?
+        .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", group_name))?;
+
+    // Get contact
+    let contact = db
+        .get_contact_by_alias(alias)?
+        .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
+
+    // Add member
+    db.add_group_member(&group.id, &contact.peer_id)?;
+
+    println!("Invited {} to group {}", alias, group_name);
+
+    Ok(())
+}
+
+/// Open interactive group chat.
+pub async fn handle_group_chat(name: &str, data_dir: &Path) -> Result<()> {
+    let db_path = database_path(data_dir);
+    let db = Database::open(&db_path).context("Failed to open database")?;
+
+    // Verify group exists
+    let group = db
+        .get_group_by_name(name)?
+        .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", name))?;
+
+    println!("Group: {} ({} members)", group.name, group.members.len());
+    println!("Interactive group chat not yet implemented");
+    println!("Use 'whisper send <member-alias> <message>' for now");
+
+    Ok(())
+}
+
+/// List all groups.
+pub async fn handle_group_list(data_dir: &Path) -> Result<()> {
+    let db_path = database_path(data_dir);
+    let db = Database::open(&db_path).context("Failed to open database")?;
+
+    let groups = db.list_groups()?;
+
+    if groups.is_empty() {
+        println!("No groups yet. Create one with: whisper group create <name>");
+        return Ok(());
+    }
+
+    println!("Groups:");
+    for group in groups {
+        println!("  {} ({} members)", group.name, group.members.len());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +494,110 @@ mod tests {
         // Try to send to non-existent contact
         let result = handle_send("nobody", "hello", data_dir).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_key_works() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+
+        // Should not error
+        handle_export_key(data_dir, "test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_key_fails_without_identity() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        let result = handle_export_key(data_dir, "test").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn group_create_works() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+        handle_group_create("test-group", data_dir).await.unwrap();
+
+        let db = Database::open(&database_path(data_dir)).unwrap();
+        let group = db.get_group_by_name("test-group").unwrap();
+        assert!(group.is_some());
+    }
+
+    #[tokio::test]
+    async fn group_create_duplicate_fails() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+        handle_group_create("my-group", data_dir).await.unwrap();
+
+        let result = handle_group_create("my-group", data_dir).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn group_invite_works() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+        handle_group_create("team", data_dir).await.unwrap();
+
+        let peer = PeerId::random();
+        handle_add_contact("alice", &peer.to_string(), data_dir)
+            .await
+            .unwrap();
+
+        handle_group_invite("team", "alice", data_dir).await.unwrap();
+
+        let db = Database::open(&database_path(data_dir)).unwrap();
+        let group = db.get_group_by_name("team").unwrap().unwrap();
+        assert_eq!(group.members.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn group_invite_unknown_group_fails() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+
+        let peer = PeerId::random();
+        handle_add_contact("alice", &peer.to_string(), data_dir)
+            .await
+            .unwrap();
+
+        let result = handle_group_invite("nonexistent", "alice", data_dir).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn group_list_works() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+        handle_group_create("group1", data_dir).await.unwrap();
+        handle_group_create("group2", data_dir).await.unwrap();
+
+        // Should not error
+        handle_group_list(data_dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peers_works() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+
+        // Should not error
+        handle_peers(data_dir, "test").await.unwrap();
     }
 }

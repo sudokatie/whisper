@@ -33,6 +33,17 @@ pub enum Commands {
     /// Initialize a new identity
     Init,
 
+    /// Export your public key
+    ExportKey,
+
+    /// Import a contact from a key file
+    ImportContact {
+        /// Path to the key file
+        file: std::path::PathBuf,
+        /// Alias for the contact
+        alias: String,
+    },
+
     /// Send a message to a contact
     Send {
         /// Contact alias
@@ -72,6 +83,39 @@ pub enum Commands {
 
     /// Show network status
     Status,
+
+    /// List connected peers
+    Peers,
+
+    /// Group commands
+    #[command(subcommand)]
+    Group(GroupCommands),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum GroupCommands {
+    /// Create a new group
+    Create {
+        /// Group name
+        name: String,
+    },
+
+    /// Invite a contact to a group
+    Invite {
+        /// Group name
+        name: String,
+        /// Contact alias
+        alias: String,
+    },
+
+    /// Open interactive group chat
+    Chat {
+        /// Group name
+        name: String,
+    },
+
+    /// List all groups
+    List,
 }
 
 /// Expand ~ to home directory.
@@ -98,6 +142,12 @@ async fn main() -> Result<()> {
         Commands::Init => {
             cli::handle_init(&data_dir, &passphrase).await?;
         }
+        Commands::ExportKey => {
+            cli::handle_export_key(&data_dir, &passphrase).await?;
+        }
+        Commands::ImportContact { file, alias } => {
+            cli::handle_import_contact(&file, &alias, &data_dir).await?;
+        }
         Commands::Send { alias, message } => {
             cli::handle_send(&alias, &message, &data_dir).await?;
         }
@@ -118,6 +168,25 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             cli::handle_status(&data_dir, &passphrase).await?;
+        }
+        Commands::Peers => {
+            cli::handle_peers(&data_dir, &passphrase).await?;
+        }
+        Commands::Group(cmd) => {
+            match cmd {
+                GroupCommands::Create { name } => {
+                    cli::handle_group_create(&name, &data_dir).await?;
+                }
+                GroupCommands::Invite { name, alias } => {
+                    cli::handle_group_invite(&name, &alias, &data_dir).await?;
+                }
+                GroupCommands::Chat { name } => {
+                    cli::handle_group_chat(&name, &data_dir).await?;
+                }
+                GroupCommands::List => {
+                    cli::handle_group_list(&data_dir).await?;
+                }
+            }
         }
     }
 

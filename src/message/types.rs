@@ -5,6 +5,51 @@ use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// A group chat.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub id: Uuid,
+    pub name: String,
+    pub members: Vec<PeerId>,
+    pub symmetric_key: Vec<u8>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Group {
+    /// Create a new group.
+    pub fn new(name: String, symmetric_key: Vec<u8>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            members: Vec::new(),
+            symmetric_key,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Add a member to the group.
+    pub fn add_member(&mut self, peer_id: PeerId) {
+        if !self.members.contains(&peer_id) {
+            self.members.push(peer_id);
+        }
+    }
+
+    /// Remove a member from the group.
+    pub fn remove_member(&mut self, peer_id: &PeerId) -> bool {
+        if let Some(pos) = self.members.iter().position(|p| p == peer_id) {
+            self.members.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if a peer is a member.
+    pub fn is_member(&self, peer_id: &PeerId) -> bool {
+        self.members.contains(peer_id)
+    }
+}
+
 /// Message recipient.
 #[derive(Debug, Clone)]
 pub enum Recipient {
@@ -119,5 +164,47 @@ mod tests {
         let msg = Message::new_text(from, Recipient::Group(group_id), "hello group".to_string());
 
         assert!(matches!(msg.to, Recipient::Group(_)));
+    }
+
+    #[test]
+    fn create_group() {
+        let group = Group::new("Test Group".to_string(), vec![1, 2, 3]);
+        assert_eq!(group.name, "Test Group");
+        assert_eq!(group.symmetric_key, vec![1, 2, 3]);
+        assert!(group.members.is_empty());
+    }
+
+    #[test]
+    fn group_add_member() {
+        let mut group = Group::new("Test".to_string(), vec![]);
+        let peer = make_peer_id();
+        group.add_member(peer);
+        assert_eq!(group.members.len(), 1);
+        assert!(group.is_member(&peer));
+    }
+
+    #[test]
+    fn group_add_member_idempotent() {
+        let mut group = Group::new("Test".to_string(), vec![]);
+        let peer = make_peer_id();
+        group.add_member(peer);
+        group.add_member(peer);
+        assert_eq!(group.members.len(), 1);
+    }
+
+    #[test]
+    fn group_remove_member() {
+        let mut group = Group::new("Test".to_string(), vec![]);
+        let peer = make_peer_id();
+        group.add_member(peer);
+        assert!(group.remove_member(&peer));
+        assert!(!group.is_member(&peer));
+    }
+
+    #[test]
+    fn group_remove_nonexistent() {
+        let mut group = Group::new("Test".to_string(), vec![]);
+        let peer = make_peer_id();
+        assert!(!group.remove_member(&peer));
     }
 }

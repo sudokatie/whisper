@@ -83,6 +83,8 @@ Messages are stored in SQLite. The database can be encrypted at rest using SQLCi
 | Command | Description |
 |---------|-------------|
 | `init` | Create a new identity |
+| `export-key` | Export your public key |
+| `import-contact <file> <alias>` | Import contact from key file |
 | `send <alias> <msg>` | Send a message |
 | `chat <alias>` | Interactive chat |
 | `contacts` | List contacts |
@@ -90,6 +92,11 @@ Messages are stored in SQLite. The database can be encrypted at rest using SQLCi
 | `trust <alias>` | Mark as trusted |
 | `block <alias>` | Block contact |
 | `status` | Network status |
+| `peers` | List connected peers |
+| `group create <name>` | Create a group |
+| `group invite <name> <alias>` | Invite contact to group |
+| `group chat <name>` | Interactive group chat |
+| `group list` | List all groups |
 
 ### Options
 
