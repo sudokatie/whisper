@@ -19,6 +19,27 @@ Whisper doesn't work that way. Your messages travel directly between you and you
 - **Offline queuing**: Messages wait until your contact comes online.
 - **Terminal UI**: Clean, fast interface that works anywhere.
 
+## Installation
+
+### From Source
+
+```bash
+# Clone the repository
+git clone https://github.com/sudokatie/whisper
+cd whisper
+
+# Build release binary
+cargo build --release
+
+# Install (optional)
+cargo install --path .
+```
+
+### Requirements
+
+- Rust 1.75+ (for async features)
+- libsodium (bundled via sodiumoxide)
+
 ## Quick Start
 
 ```bash
@@ -40,10 +61,22 @@ whisper status
 
 ## Security Model
 
-1. **Identity**: Ed25519 keypair, stored encrypted with your passphrase
-2. **Transport**: Noise protocol via libp2p
-3. **Messages**: X25519 + XChaCha20-Poly1305 (libsodium sealed box)
-4. **Storage**: SQLite encrypted at rest
+### Identity
+Your identity is an Ed25519 keypair stored locally, encrypted with your passphrase using Argon2 key derivation and XChaCha20-Poly1305.
+
+### Transport
+All peer connections use the Noise protocol via libp2p, providing mutual authentication and forward secrecy.
+
+### Messages
+Direct messages use X25519 sealed boxes (libsodium), providing:
+- Asymmetric encryption (only recipient can decrypt)
+- Anonymous sender (recipient verifies via other channels)
+- No key exchange required (uses recipient's public key directly)
+
+Group messages use XChaCha20-Poly1305 with a shared symmetric key distributed to members.
+
+### Storage
+Messages are stored in SQLite. The database can be encrypted at rest using SQLCipher (optional).
 
 ## Commands
 
@@ -58,11 +91,53 @@ whisper status
 | `block <alias>` | Block contact |
 | `status` | Network status |
 
-## Building
+### Options
+
+```
+--data-dir <path>     Data directory (default: ~/.whisper)
+--passphrase <pass>   Keypair passphrase (or set WHISPER_PASSPHRASE)
+```
+
+## Architecture
+
+```
+whisper/
+├── src/
+│   ├── identity/      # Keypair generation, contact management
+│   ├── crypto/        # Encryption, key exchange, group keys
+│   ├── message/       # Message types, queue, sync
+│   ├── network/       # libp2p behaviour, discovery, relay
+│   ├── storage/       # SQLite database
+│   ├── ui/            # Terminal interface (ratatui)
+│   └── cli/           # Command handlers
+├── tests/             # Integration tests
+└── docs/              # Build documentation
+```
+
+### Key Dependencies
+
+- **libp2p**: P2P networking (mDNS, Kademlia, relay)
+- **sodiumoxide**: Cryptography (sealed boxes, secretbox)
+- **rusqlite**: SQLite database
+- **ratatui**: Terminal UI
+- **tokio**: Async runtime
+
+## Development
 
 ```bash
-cargo build --release
+# Run tests
+cargo test
+
+# Run with logging
+RUST_LOG=whisper=debug cargo run -- status
+
+# Check for issues
+cargo clippy
 ```
+
+## Contributing
+
+Pull requests welcome. Please run tests and clippy before submitting.
 
 ## License
 
