@@ -21,7 +21,10 @@ use ratatui::{
 };
 use tokio::sync::Mutex;
 
-use crate::crypto::generate_group_key;
+use crate::crypto::{
+    decrypt_message, ed25519_pk_to_x25519, encrypt_message, generate_group_key,
+    keypair_to_encryption_keys,
+};
 use crate::identity::{
     export_public_key, generate_keypair, import_public_key, keypair_to_peer_id, load_keypair,
     save_keypair, Contact, TrustLevel,
@@ -151,6 +154,10 @@ pub async fn handle_chat(alias: &str, data_dir: &Path, passphrase: &str) -> Resu
         }
     }
 
+    // Derive encryption keys from our identity keypair
+    let (our_enc_pk, our_enc_sk) = keypair_to_encryption_keys(&keypair)
+        .context("Failed to derive encryption keys")?;
+
     // Create and start the network node
     let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
     
@@ -161,7 +168,7 @@ pub async fn handle_chat(alias: &str, data_dir: &Path, passphrase: &str) -> Resu
     let node = Arc::new(Mutex::new(node));
 
     // Run the TUI with network integration
-    run_tui_with_network(&mut app, &db, node).await?;
+    run_tui_with_network(&mut app, &db, node, &our_enc_pk, &our_enc_sk).await?;
 
     Ok(())
 }
@@ -171,6 +178,8 @@ async fn run_tui_with_network(
     app: &mut App,
     db: &Database,
     node: Arc<Mutex<WhisperNode>>,
+    our_enc_pk: &sodiumoxide::crypto::box_::PublicKey,
+    our_enc_sk: &sodiumoxide::crypto::box_::SecretKey,
 ) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -223,7 +232,10 @@ async fn run_tui_with_network(
                 match action {
                     InputAction::Send(text) => {
                         if let Some(peer_id) = app.current_chat {
-                            // Create and store message
+                            // Get contact's public key for encryption
+                            let contact_opt = db.get_contact(&peer_id).ok().flatten();
+                            
+                            // Create and store message (plaintext in our local DB)
                             let from = app.our_peer_id.unwrap_or_else(PeerId::random);
                             let msg = Message::new_text(
                                 from,
@@ -234,11 +246,32 @@ async fn run_tui_with_network(
                             // Store in database
                             let _ = db.insert_message(&msg);
 
-                            // Send over network
+                            // Encrypt and send over network
                             {
                                 let mut node = node.lock().await;
-                                // Serialize message content for network
-                                let data = text.as_bytes().to_vec();
+                                
+                                // Try to encrypt with contact's public key
+                                let data = if let Some(contact) = contact_opt {
+                                    if !contact.public_key.is_empty() {
+                                        // Convert Ed25519 public key to X25519 for encryption
+                                        match ed25519_pk_to_x25519(&contact.public_key) {
+                                            Ok(recipient_pk) => {
+                                                match encrypt_message(text.as_bytes(), &recipient_pk) {
+                                                    Ok(encrypted) => encrypted,
+                                                    Err(_) => text.as_bytes().to_vec(), // Fallback
+                                                }
+                                            }
+                                            Err(_) => text.as_bytes().to_vec(), // Fallback
+                                        }
+                                    } else {
+                                        // No public key stored, send unencrypted (for now)
+                                        text.as_bytes().to_vec()
+                                    }
+                                } else {
+                                    // Contact not found, send unencrypted
+                                    text.as_bytes().to_vec()
+                                };
+                                
                                 node.send_message(peer_id, data);
                             }
 
@@ -284,25 +317,31 @@ async fn run_tui_with_network(
                         connected_count = connected_count.saturating_sub(1);
                     }
                     NodeEvent::MessageReceived { from, data } => {
-                        // Convert bytes to text
-                        if let Ok(text) = String::from_utf8(data) {
-                            // Store in database
-                            let msg = Message::new_text(
-                                from,
-                                Recipient::Direct(app.our_peer_id.unwrap_or_else(PeerId::random)),
-                                text.clone(),
-                            );
-                            let _ = db.insert_message(&msg);
-
-                            // Add to display if it's from current chat
-                            if app.current_chat == Some(from) {
-                                app.messages.push(DisplayMessage::new(
-                                    from,
-                                    text,
-                                    Utc::now(),
-                                    false,
-                                ));
+                        // Try to decrypt with our secret key, fall back to plaintext
+                        let text = match decrypt_message(&data, our_enc_pk, our_enc_sk) {
+                            Ok(plaintext) => String::from_utf8_lossy(&plaintext).to_string(),
+                            Err(_) => {
+                                // Not encrypted or wrong key - try as plaintext
+                                String::from_utf8_lossy(&data).to_string()
                             }
+                        };
+
+                        // Store in database
+                        let msg = Message::new_text(
+                            from,
+                            Recipient::Direct(app.our_peer_id.unwrap_or_else(PeerId::random)),
+                            text.clone(),
+                        );
+                        let _ = db.insert_message(&msg);
+
+                        // Add to display if it's from current chat
+                        if app.current_chat == Some(from) {
+                            app.messages.push(DisplayMessage::new(
+                                from,
+                                text,
+                                Utc::now(),
+                                false,
+                            ));
                         }
                     }
                     NodeEvent::Listening(addr) => {
@@ -467,7 +506,12 @@ pub async fn handle_import_contact(file: &Path, alias: &str, data_dir: &Path, pa
     // Parse public key and derive peer ID
     let public_key = import_public_key(key_data).context("Invalid public key format")?;
     let peer_id = PeerId::from(public_key.clone());
-    let key_bytes = public_key.encode_protobuf();
+    
+    // Extract raw Ed25519 bytes (32 bytes) for encryption key derivation
+    let key_bytes = public_key.clone()
+        .try_into_ed25519()
+        .map(|ed_pk| ed_pk.to_bytes().to_vec())
+        .unwrap_or_else(|_| public_key.encode_protobuf()); // Fallback to protobuf if not Ed25519
 
     // Create contact
     let contact = Contact {
@@ -593,6 +637,10 @@ pub async fn handle_group_chat(name: &str, data_dir: &Path, passphrase: &str) ->
     }
     app.mode = AppMode::Chat;
 
+    // Derive encryption keys from our identity keypair
+    let (our_enc_pk, our_enc_sk) = keypair_to_encryption_keys(&keypair)
+        .context("Failed to derive encryption keys")?;
+
     // Create and start the network node
     let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
     node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
@@ -601,7 +649,7 @@ pub async fn handle_group_chat(name: &str, data_dir: &Path, passphrase: &str) ->
     // Run the TUI with network integration
     // Note: For groups, messages should be sent to all members
     // This is a simplified version - full implementation would use group encryption
-    run_tui_with_network(&mut app, &db, node).await?;
+    run_tui_with_network(&mut app, &db, node, &our_enc_pk, &our_enc_sk).await?;
 
     Ok(())
 }

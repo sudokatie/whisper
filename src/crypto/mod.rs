@@ -12,6 +12,8 @@ pub use encrypt::{
 };
 pub use keys::{
     derive_shared_secret,
+    ed25519_pk_to_x25519,
+    keypair_to_encryption_keys,
     public_key_from_bytes,
     public_key_to_bytes,
     secret_key_from_bytes,
