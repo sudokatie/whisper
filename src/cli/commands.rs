@@ -22,14 +22,50 @@ use ratatui::{
 use tokio::sync::Mutex;
 
 use crate::crypto::{
-    decrypt_message, ed25519_pk_to_x25519, encrypt_message, generate_group_key,
-    keypair_to_encryption_keys,
+    decrypt_from_group, decrypt_message, ed25519_pk_to_x25519, encrypt_for_group,
+    encrypt_message, generate_group_key, keypair_to_encryption_keys,
 };
+
+/// Wire message prefix for receipts.
+const RECEIPT_PREFIX: &[u8] = b"RCPT:";
+
+/// Parse a wire message to check if it's a receipt.
+/// Returns Some((message_id, receipt_type)) if it's a receipt, None otherwise.
+fn parse_receipt(data: &[u8]) -> Option<(uuid::Uuid, crate::message::ReceiptType)> {
+    if !data.starts_with(RECEIPT_PREFIX) {
+        return None;
+    }
+    let payload = &data[RECEIPT_PREFIX.len()..];
+    // Format: "D:<uuid>" for delivered, "R:<uuid>" for read
+    if payload.len() < 38 {
+        return None;
+    }
+    let receipt_type = match payload[0] {
+        b'D' => crate::message::ReceiptType::Delivered,
+        b'R' => crate::message::ReceiptType::Read,
+        _ => return None,
+    };
+    if payload[1] != b':' {
+        return None;
+    }
+    let uuid_str = std::str::from_utf8(&payload[2..38]).ok()?;
+    let id = uuid::Uuid::parse_str(uuid_str).ok()?;
+    Some((id, receipt_type))
+}
+
+/// Create a wire receipt message.
+fn create_receipt(message_id: &uuid::Uuid, receipt_type: crate::message::ReceiptType) -> Vec<u8> {
+    let type_char = match receipt_type {
+        crate::message::ReceiptType::Delivered => 'D',
+        crate::message::ReceiptType::Read => 'R',
+    };
+    format!("RCPT:{}:{}", type_char, message_id).into_bytes()
+}
 use crate::identity::{
     export_public_key, generate_keypair, import_public_key, keypair_to_peer_id, load_keypair,
     save_keypair, Contact, TrustLevel,
 };
-use crate::message::{Group, Message, MessageContent, Recipient};
+use crate::message::{Group, Message, MessageContent, MessageStatus, Recipient};
 use crate::network::{NodeEvent, WhisperNode};
 use crate::storage::Database;
 use crate::ui::{
@@ -111,12 +147,8 @@ pub async fn handle_send(alias: &str, message: &str, data_dir: &Path, passphrase
     );
     db.insert_message(&msg)?;
 
-    // Create network node and try to send
-    let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
-    node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    // Encrypt the message if we have the contact's public key
-    let data = if !contact.public_key.is_empty() {
+    // Encrypt the message
+    let encrypted_data = if !contact.public_key.is_empty() {
         match ed25519_pk_to_x25519(&contact.public_key) {
             Ok(recipient_pk) => {
                 encrypt_message(message.as_bytes(), &recipient_pk)
@@ -128,15 +160,16 @@ pub async fn handle_send(alias: &str, message: &str, data_dir: &Path, passphrase
         message.as_bytes().to_vec()
     };
 
-    // Queue the message for sending
-    node.send_message(contact.peer_id, data);
+    // Store in persistent queue (survives restarts)
+    db.queue_pending_message(&msg.id, &contact.peer_id, &encrypted_data)?;
+
+    // Try to send now
+    let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
+    node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    node.send_message(contact.peer_id, encrypted_data);
 
     println!("Message to {}: {}", contact.alias, message);
-    if node.pending_count() > 0 {
-        println!("(Queued - recipient offline. Will deliver when they connect.)");
-    } else {
-        println!("(Sent)");
-    }
+    println!("(Queued persistently - will deliver when recipient connects.)");
 
     Ok(())
 }
@@ -350,19 +383,40 @@ async fn run_tui_with_network(
                             contact.last_seen = Some(Utc::now());
                             let _ = db.upsert_contact(&contact);
                         }
+                        
+                        // Flush pending messages for this peer from persistent queue
+                        if let Ok(pending) = db.get_pending_for_peer(&peer_id) {
+                            for (msg_id, encrypted_data) in pending {
+                                node.send_message(peer_id, encrypted_data);
+                                // Remove from queue after sending
+                                let _ = db.remove_pending_message(&msg_id);
+                            }
+                        }
                     }
                     NodeEvent::PeerDisconnected(_) => {
                         connected_count = connected_count.saturating_sub(1);
                     }
                     NodeEvent::MessageReceived { from, data } => {
                         // Try to decrypt with our secret key, fall back to plaintext
-                        let text = match decrypt_message(&data, our_enc_pk, our_enc_sk) {
-                            Ok(plaintext) => String::from_utf8_lossy(&plaintext).to_string(),
-                            Err(_) => {
-                                // Not encrypted or wrong key - try as plaintext
-                                String::from_utf8_lossy(&data).to_string()
-                            }
+                        let decrypted = match decrypt_message(&data, our_enc_pk, our_enc_sk) {
+                            Ok(plaintext) => plaintext,
+                            Err(_) => data.clone(), // Not encrypted or wrong key
                         };
+
+                        // Check if this is a receipt
+                        if let Some((msg_id, receipt_type)) = parse_receipt(&decrypted) {
+                            // Update the message status in our database
+                            let new_status = match receipt_type {
+                                crate::message::ReceiptType::Delivered => MessageStatus::Delivered,
+                                crate::message::ReceiptType::Read => MessageStatus::Read,
+                            };
+                            let _ = db.update_message_status(&msg_id, &new_status);
+                            // Don't display receipts in chat
+                            continue;
+                        }
+
+                        // Regular text message
+                        let text = String::from_utf8_lossy(&decrypted).to_string();
 
                         // Store in database
                         let msg = Message::new_text(
@@ -371,6 +425,10 @@ async fn run_tui_with_network(
                             text.clone(),
                         );
                         let _ = db.insert_message(&msg);
+
+                        // Send delivery receipt back to sender
+                        let receipt = create_receipt(&msg.id, crate::message::ReceiptType::Delivered);
+                        node.send_message(from, receipt);
 
                         // Add to display if it's from current chat
                         if app.current_chat == Some(from) {
@@ -508,19 +566,39 @@ async fn run_group_tui_with_network(
                             contact.last_seen = Some(Utc::now());
                             let _ = db.upsert_contact(&contact);
                         }
+                        
+                        // Flush pending messages for this peer from persistent queue
+                        if let Ok(pending) = db.get_pending_for_peer(&peer_id) {
+                            for (msg_id, encrypted_data) in pending {
+                                node.send_message(peer_id, encrypted_data);
+                                let _ = db.remove_pending_message(&msg_id);
+                            }
+                        }
                     }
                     NodeEvent::PeerDisconnected(_) => {
                         connected_count = connected_count.saturating_sub(1);
                     }
                     NodeEvent::MessageReceived { from, data } => {
                         // Try group decryption first, then DM decryption, then plaintext
-                        let text = if let Ok(plaintext) = decrypt_from_group(&data, &group.symmetric_key) {
-                            String::from_utf8_lossy(&plaintext).to_string()
+                        let decrypted = if let Ok(plaintext) = decrypt_from_group(&data, &group.symmetric_key) {
+                            plaintext
                         } else if let Ok(plaintext) = decrypt_message(&data, our_enc_pk, our_enc_sk) {
-                            String::from_utf8_lossy(&plaintext).to_string()
+                            plaintext
                         } else {
-                            String::from_utf8_lossy(&data).to_string()
+                            data.clone()
                         };
+
+                        // Check if this is a receipt
+                        if let Some((msg_id, receipt_type)) = parse_receipt(&decrypted) {
+                            let new_status = match receipt_type {
+                                crate::message::ReceiptType::Delivered => MessageStatus::Delivered,
+                                crate::message::ReceiptType::Read => MessageStatus::Read,
+                            };
+                            let _ = db.update_message_status(&msg_id, &new_status);
+                            continue;
+                        }
+
+                        let text = String::from_utf8_lossy(&decrypted).to_string();
 
                         // Store in database
                         let msg = Message::new_text(
@@ -529,6 +607,10 @@ async fn run_group_tui_with_network(
                             text.clone(),
                         );
                         let _ = db.insert_message(&msg);
+
+                        // Send delivery receipt back to sender
+                        let receipt = create_receipt(&msg.id, crate::message::ReceiptType::Delivered);
+                        node.send_message(from, receipt);
 
                         // Add to display (all group messages shown)
                         app.messages.push(DisplayMessage::new(
@@ -718,23 +800,75 @@ pub async fn handle_import_contact(file: &Path, alias: &str, data_dir: &Path, pa
 }
 
 /// List connected peers.
-pub async fn handle_peers(data_dir: &Path, _passphrase: &str) -> Result<()> {
+/// 
+/// Since Whisper doesn't run a background daemon, this shows:
+/// 1. Contacts with recent last_seen timestamps (recently online)
+/// 2. Pending messages waiting for delivery
+pub async fn handle_peers(data_dir: &Path, passphrase: &str) -> Result<()> {
     let key_path = keypair_path(data_dir);
 
     if !key_path.exists() {
         anyhow::bail!("No identity found. Run: whisper init");
     }
 
-    // In a real implementation, this would connect to the network
-    // and list currently connected peers
-    println!("Connected Peers");
-    println!("===============");
-    println!("(Not connected - network features not fully implemented)");
+    let db_path = database_path(data_dir);
+    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+
+    println!("Peer Status");
+    println!("===========");
     println!();
-    println!("To connect, the node would need to be running with:");
-    println!("  whisper chat <alias>");
+
+    // Show contacts with last_seen info
+    let contacts = db.list_contacts()?;
+    let now = Utc::now();
+
+    println!("Known Contacts:");
+    if contacts.is_empty() {
+        println!("  (none)");
+    } else {
+        for contact in &contacts {
+            let status = match contact.last_seen {
+                Some(seen) => {
+                    let ago = now.signed_duration_since(seen);
+                    if ago.num_minutes() < 5 {
+                        "recently online".to_string()
+                    } else if ago.num_hours() < 1 {
+                        format!("{}m ago", ago.num_minutes())
+                    } else if ago.num_hours() < 24 {
+                        format!("{}h ago", ago.num_hours())
+                    } else {
+                        format!("{}d ago", ago.num_days())
+                    }
+                }
+                None => "never seen".to_string(),
+            };
+            println!("  {} - {}", contact.alias, status);
+        }
+    }
+
+    // Show pending messages
+    let pending = db.get_all_pending()?;
     println!();
-    println!("Hint: Known contacts can be listed with: whisper contacts");
+    println!("Pending Messages: {}", pending.len());
+    if !pending.is_empty() {
+        // Group by peer
+        let mut by_peer: std::collections::HashMap<PeerId, usize> = std::collections::HashMap::new();
+        for (_, peer_id, _) in &pending {
+            *by_peer.entry(*peer_id).or_insert(0) += 1;
+        }
+        for (peer_id, count) in by_peer {
+            // Try to find alias
+            let alias = contacts.iter()
+                .find(|c| c.peer_id == peer_id)
+                .map(|c| c.alias.as_str())
+                .unwrap_or("unknown");
+            println!("  {} messages for {}", count, alias);
+        }
+    }
+
+    println!();
+    println!("Note: Whisper connects when you start a chat session.");
+    println!("Use 'whisper chat <alias>' to connect and deliver pending messages.");
 
     Ok(())
 }
@@ -763,9 +897,18 @@ pub async fn handle_group_create(name: &str, data_dir: &Path, passphrase: &str) 
 }
 
 /// Invite a contact to a group.
+/// 
+/// This adds them to the group AND sends them the encrypted group key.
 pub async fn handle_group_invite(group_name: &str, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db_path = database_path(data_dir);
     let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    if !key_path.exists() {
+        anyhow::bail!("No identity found. Run: whisper init");
+    }
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
 
     // Get group
     let group = db
@@ -777,10 +920,42 @@ pub async fn handle_group_invite(group_name: &str, alias: &str, data_dir: &Path,
         .get_contact_by_alias(alias)?
         .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
 
-    // Add member
+    // Add member to local database
     db.add_group_member(&group.id, &contact.peer_id)?;
 
-    println!("Invited {} to group {}", alias, group_name);
+    // Send encrypted group key to the invited member
+    // Format: "GROUP_INVITE:<group_name>:<group_id>:<encrypted_symmetric_key>"
+    if !contact.public_key.is_empty() {
+        if let Ok(recipient_pk) = ed25519_pk_to_x25519(&contact.public_key) {
+            // Encrypt the symmetric key with the recipient's public key
+            let encrypted_key = encrypt_message(&group.symmetric_key, &recipient_pk)
+                .context("Failed to encrypt group key")?;
+            
+            // Create invite payload
+            let invite_payload = format!(
+                "GROUP_INVITE:{}:{}:",
+                group.name,
+                group.id
+            );
+            let mut invite_data = invite_payload.into_bytes();
+            invite_data.extend_from_slice(&encrypted_key);
+
+            // Queue for delivery
+            let invite_id = uuid::Uuid::new_v4();
+            db.queue_pending_message(&invite_id, &contact.peer_id, &invite_data)?;
+
+            // Try to send now
+            let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
+            node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+            node.send_message(contact.peer_id, invite_data);
+
+            println!("Invited {} to group {} (group key sent encrypted)", alias, group_name);
+        } else {
+            println!("Invited {} to group {} (no public key - key exchange needed)", alias, group_name);
+        }
+    } else {
+        println!("Invited {} to group {} (no public key - key exchange needed)", alias, group_name);
+    }
 
     Ok(())
 }
@@ -1102,5 +1277,49 @@ mod tests {
 
         // Should not error
         handle_peers(data_dir, "test").await.unwrap();
+    }
+
+    // Receipt tests
+
+    #[test]
+    fn create_and_parse_delivered_receipt() {
+        let msg_id = uuid::Uuid::new_v4();
+        let receipt = create_receipt(&msg_id, crate::message::ReceiptType::Delivered);
+        
+        let parsed = parse_receipt(&receipt);
+        assert!(parsed.is_some());
+        
+        let (parsed_id, parsed_type) = parsed.unwrap();
+        assert_eq!(parsed_id, msg_id);
+        assert!(matches!(parsed_type, crate::message::ReceiptType::Delivered));
+    }
+
+    #[test]
+    fn create_and_parse_read_receipt() {
+        let msg_id = uuid::Uuid::new_v4();
+        let receipt = create_receipt(&msg_id, crate::message::ReceiptType::Read);
+        
+        let parsed = parse_receipt(&receipt);
+        assert!(parsed.is_some());
+        
+        let (parsed_id, parsed_type) = parsed.unwrap();
+        assert_eq!(parsed_id, msg_id);
+        assert!(matches!(parsed_type, crate::message::ReceiptType::Read));
+    }
+
+    #[test]
+    fn parse_receipt_rejects_non_receipts() {
+        let text_msg = b"Hello, world!";
+        assert!(parse_receipt(text_msg).is_none());
+    }
+
+    #[test]
+    fn parse_receipt_rejects_malformed() {
+        // Wrong prefix
+        assert!(parse_receipt(b"RECEIPT:D:12345").is_none());
+        // Too short
+        assert!(parse_receipt(b"RCPT:D:123").is_none());
+        // Invalid type
+        assert!(parse_receipt(b"RCPT:X:12345678-1234-1234-1234-123456789012").is_none());
     }
 }

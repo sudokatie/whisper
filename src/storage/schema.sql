@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS group_members (
     PRIMARY KEY (group_id, peer_id)
 );
 
+CREATE TABLE IF NOT EXISTS pending_messages (
+    id TEXT PRIMARY KEY,
+    to_peer TEXT NOT NULL,
+    encrypted_data BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    attempts INTEGER DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_peer);
 CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_peer);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+CREATE INDEX IF NOT EXISTS idx_pending_to ON pending_messages(to_peer);

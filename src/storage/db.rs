@@ -430,6 +430,88 @@ impl Database {
 
         Ok(members)
     }
+
+    // === Pending Message Queue (Persistent Offline Queue) ===
+
+    /// Queue an encrypted message for later delivery.
+    pub fn queue_pending_message(&self, id: &Uuid, to_peer: &PeerId, encrypted_data: &[u8]) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO pending_messages (id, to_peer, encrypted_data, created_at, attempts)
+             VALUES (?1, ?2, ?3, ?4, 0)",
+            params![
+                id.to_string(),
+                to_peer.to_string(),
+                encrypted_data,
+                Utc::now().timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get all pending messages for a peer.
+    pub fn get_pending_for_peer(&self, peer_id: &PeerId) -> Result<Vec<(Uuid, Vec<u8>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, encrypted_data FROM pending_messages WHERE to_peer = ?1 ORDER BY created_at",
+        )?;
+
+        let rows = stmt.query_map(params![peer_id.to_string()], |row| {
+            let id_str: String = row.get(0)?;
+            let data: Vec<u8> = row.get(1)?;
+            Ok((id_str, data))
+        })?;
+
+        let mut pending = Vec::new();
+        for row in rows {
+            let (id_str, data) = row?;
+            if let Ok(id) = Uuid::parse_str(&id_str) {
+                pending.push((id, data));
+            }
+        }
+
+        Ok(pending)
+    }
+
+    /// Remove a pending message after successful delivery.
+    pub fn remove_pending_message(&self, id: &Uuid) -> Result<bool> {
+        let rows = self.conn.execute(
+            "DELETE FROM pending_messages WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Get all pending messages (for loading queue on startup).
+    pub fn get_all_pending(&self) -> Result<Vec<(Uuid, PeerId, Vec<u8>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, to_peer, encrypted_data FROM pending_messages ORDER BY created_at",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id_str: String = row.get(0)?;
+            let peer_str: String = row.get(1)?;
+            let data: Vec<u8> = row.get(2)?;
+            Ok((id_str, peer_str, data))
+        })?;
+
+        let mut pending = Vec::new();
+        for row in rows {
+            let (id_str, peer_str, data) = row?;
+            if let (Ok(id), Ok(peer_id)) = (Uuid::parse_str(&id_str), peer_str.parse()) {
+                pending.push((id, peer_id, data));
+            }
+        }
+
+        Ok(pending)
+    }
+
+    /// Increment attempt count for a pending message.
+    pub fn increment_pending_attempts(&self, id: &Uuid) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pending_messages SET attempts = attempts + 1 WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
 }
 
 struct MessageRow {
@@ -670,5 +752,73 @@ mod tests {
 
         let loaded = db.get_group(&group.id).unwrap().unwrap();
         assert_eq!(loaded.members.len(), 2);
+    }
+
+    // === Pending Queue Tests ===
+
+    #[test]
+    fn queue_pending_message() {
+        let db = Database::open_in_memory().unwrap();
+        let peer = make_peer_id();
+        let id = Uuid::new_v4();
+
+        db.queue_pending_message(&id, &peer, b"encrypted data").unwrap();
+
+        let pending = db.get_pending_for_peer(&peer).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, id);
+        assert_eq!(pending[0].1, b"encrypted data");
+    }
+
+    #[test]
+    fn get_all_pending() {
+        let db = Database::open_in_memory().unwrap();
+        let peer1 = make_peer_id();
+        let peer2 = make_peer_id();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+
+        db.queue_pending_message(&id1, &peer1, b"msg1").unwrap();
+        db.queue_pending_message(&id2, &peer2, b"msg2").unwrap();
+
+        let all = db.get_all_pending().unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn remove_pending_message() {
+        let db = Database::open_in_memory().unwrap();
+        let peer = make_peer_id();
+        let id = Uuid::new_v4();
+
+        db.queue_pending_message(&id, &peer, b"data").unwrap();
+        assert!(db.remove_pending_message(&id).unwrap());
+        
+        let pending = db.get_pending_for_peer(&peer).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn pending_survives_reopen() {
+        use tempfile::tempdir;
+        
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let peer = make_peer_id();
+        let id = Uuid::new_v4();
+
+        // Queue and close
+        {
+            let db = Database::open(&path, "").unwrap();
+            db.queue_pending_message(&id, &peer, b"persist me").unwrap();
+        }
+
+        // Reopen and verify
+        {
+            let db = Database::open(&path, "").unwrap();
+            let pending = db.get_all_pending().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].2, b"persist me");
+        }
     }
 }

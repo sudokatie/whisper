@@ -16,7 +16,8 @@ Whisper doesn't work that way. Your messages travel directly between you and you
 - **Local discovery**: Find contacts on your local network via mDNS.
 - **Global discovery**: Connect with anyone using Kademlia DHT.
 - **NAT traversal**: Works behind firewalls using relay nodes.
-- **Offline queuing**: Messages wait until your contact comes online.
+- **Persistent offline queue**: Messages survive restarts and deliver when contacts come online.
+- **Automatic key distribution**: Group keys are encrypted and sent to invited members.
 - **Terminal UI**: Clean, fast interface that works anywhere.
 
 ## Installation
