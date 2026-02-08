@@ -87,18 +87,56 @@ pub async fn handle_init(data_dir: &Path, passphrase: &str) -> Result<()> {
 
 /// Send a message to a contact.
 pub async fn handle_send(alias: &str, message: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    // This would normally connect to the network and send
-    // For now, just queue the message
     let db_path = database_path(data_dir);
     let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    if !key_path.exists() {
+        anyhow::bail!("No identity found. Run: whisper init");
+    }
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let our_peer_id = keypair_to_peer_id(&keypair);
 
     // Look up contact
     let contact = db
         .get_contact_by_alias(alias)?
         .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
 
-    println!("Sending to {}: {}", contact.alias, message);
-    println!("(Message queued - connect to network to deliver)");
+    // Create and store the message
+    let msg = Message::new_text(
+        our_peer_id,
+        Recipient::Direct(contact.peer_id),
+        message.to_string(),
+    );
+    db.insert_message(&msg)?;
+
+    // Create network node and try to send
+    let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
+    node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    // Encrypt the message if we have the contact's public key
+    let data = if !contact.public_key.is_empty() {
+        match ed25519_pk_to_x25519(&contact.public_key) {
+            Ok(recipient_pk) => {
+                encrypt_message(message.as_bytes(), &recipient_pk)
+                    .unwrap_or_else(|_| message.as_bytes().to_vec())
+            }
+            Err(_) => message.as_bytes().to_vec(),
+        }
+    } else {
+        message.as_bytes().to_vec()
+    };
+
+    // Queue the message for sending
+    node.send_message(contact.peer_id, data);
+
+    println!("Message to {}: {}", contact.alias, message);
+    if node.pending_count() > 0 {
+        println!("(Queued - recipient offline. Will deliver when they connect.)");
+    } else {
+        println!("(Sent)");
+    }
 
     Ok(())
 }
@@ -351,6 +389,156 @@ async fn run_tui_with_network(
                     NodeEvent::MessageSent { .. } => {
                         // Message confirmed sent
                     }
+                }
+            }
+        }
+    }
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    Ok(())
+}
+
+/// Run the TUI event loop for group chat with multicast.
+async fn run_group_tui_with_network(
+    app: &mut App,
+    db: &Database,
+    node: Arc<Mutex<WhisperNode>>,
+    group: &Group,
+    our_enc_pk: &sodiumoxide::crypto::box_::PublicKey,
+    our_enc_sk: &sodiumoxide::crypto::box_::SecretKey,
+) -> Result<()> {
+    use crate::crypto::{encrypt_for_group, decrypt_from_group};
+    
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut connected_count = 0usize;
+
+    loop {
+        // Draw
+        terminal.draw(|frame| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(3)])
+                .split(frame.area());
+
+            render_chat(
+                frame,
+                chunks[0],
+                &app.messages,
+                &app.input,
+                app.mode == AppMode::Input,
+            );
+
+            let peer_id = app.our_peer_id.unwrap_or_else(PeerId::random);
+            render_status(frame, chunks[1], &peer_id, connected_count);
+        })?;
+
+        // Poll keyboard
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                let action = app.handle_key(key);
+
+                match action {
+                    InputAction::Send(text) => {
+                        let from = app.our_peer_id.unwrap_or_else(PeerId::random);
+                        
+                        // Store message with group recipient
+                        let msg = Message::new_text(
+                            from,
+                            Recipient::Group(group.id),
+                            text.clone(),
+                        );
+                        let _ = db.insert_message(&msg);
+
+                        // Encrypt with group's symmetric key
+                        let encrypted = encrypt_for_group(text.as_bytes(), &group.symmetric_key)
+                            .unwrap_or_else(|_| text.as_bytes().to_vec());
+
+                        // Send to ALL group members (multicast)
+                        {
+                            let mut node = node.lock().await;
+                            for member_peer_id in &group.members {
+                                // Don't send to ourselves
+                                if *member_peer_id != from {
+                                    node.send_message(*member_peer_id, encrypted.clone());
+                                }
+                            }
+                        }
+
+                        // Add to display
+                        app.messages.push(DisplayMessage::new(
+                            from,
+                            text,
+                            Utc::now(),
+                            true,
+                        ));
+                    }
+                    InputAction::Cancel => {}
+                    InputAction::None => {}
+                }
+
+                if app.should_quit {
+                    break;
+                }
+            }
+        }
+
+        // Poll network
+        {
+            let mut node = node.lock().await;
+            let poll_result = tokio::time::timeout(
+                Duration::from_millis(10),
+                node.poll_event()
+            ).await;
+
+            if let Ok(Some(event)) = poll_result {
+                match event {
+                    NodeEvent::PeerConnected(peer_id) => {
+                        connected_count += 1;
+                        if let Ok(Some(mut contact)) = db.get_contact(&peer_id) {
+                            contact.last_seen = Some(Utc::now());
+                            let _ = db.upsert_contact(&contact);
+                        }
+                    }
+                    NodeEvent::PeerDisconnected(_) => {
+                        connected_count = connected_count.saturating_sub(1);
+                    }
+                    NodeEvent::MessageReceived { from, data } => {
+                        // Try group decryption first, then DM decryption, then plaintext
+                        let text = if let Ok(plaintext) = decrypt_from_group(&data, &group.symmetric_key) {
+                            String::from_utf8_lossy(&plaintext).to_string()
+                        } else if let Ok(plaintext) = decrypt_message(&data, our_enc_pk, our_enc_sk) {
+                            String::from_utf8_lossy(&plaintext).to_string()
+                        } else {
+                            String::from_utf8_lossy(&data).to_string()
+                        };
+
+                        // Store in database
+                        let msg = Message::new_text(
+                            from,
+                            Recipient::Group(group.id),
+                            text.clone(),
+                        );
+                        let _ = db.insert_message(&msg);
+
+                        // Add to display (all group messages shown)
+                        app.messages.push(DisplayMessage::new(
+                            from,
+                            text,
+                            Utc::now(),
+                            false,
+                        ));
+                    }
+                    NodeEvent::Listening(_) | NodeEvent::MessageSent { .. } => {}
                 }
             }
         }
@@ -630,14 +818,10 @@ pub async fn handle_group_chat(name: &str, data_dir: &Path, passphrase: &str) ->
         app.add_contact(c);
     }
 
-    // Set mode to chat (using first group member as "current chat" for display purposes)
-    // In a real implementation, we'd have a separate group chat mode
-    if let Some(first_member) = group.members.first() {
-        app.current_chat = Some(*first_member);
-    }
+    // Set mode to chat
     app.mode = AppMode::Chat;
 
-    // Derive encryption keys from our identity keypair
+    // Derive encryption keys from our identity keypair (for fallback DM decryption)
     let (our_enc_pk, our_enc_sk) = keypair_to_encryption_keys(&keypair)
         .context("Failed to derive encryption keys")?;
 
@@ -646,10 +830,8 @@ pub async fn handle_group_chat(name: &str, data_dir: &Path, passphrase: &str) ->
     node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
     let node = Arc::new(Mutex::new(node));
 
-    // Run the TUI with network integration
-    // Note: For groups, messages should be sent to all members
-    // This is a simplified version - full implementation would use group encryption
-    run_tui_with_network(&mut app, &db, node, &our_enc_pk, &our_enc_sk).await?;
+    // Run the group TUI with multicast to all members
+    run_group_tui_with_network(&mut app, &db, node, &group, &our_enc_pk, &our_enc_sk).await?;
 
     Ok(())
 }
