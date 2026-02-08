@@ -22,8 +22,8 @@ use ratatui::{
 use tokio::sync::Mutex;
 
 use crate::crypto::{
-    decrypt_from_group, decrypt_message, ed25519_pk_to_x25519, encrypt_for_group,
-    encrypt_message, generate_group_key, keypair_to_encryption_keys,
+    decrypt_message, ed25519_pk_to_x25519, encrypt_message, generate_group_key,
+    keypair_to_encryption_keys,
 };
 
 /// Wire message prefix for receipts.
