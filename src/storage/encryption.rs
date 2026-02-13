@@ -10,7 +10,6 @@ use argon2::{
 };
 
 const SALT_FILE: &str = ".whisper.salt";
-const ARGON2_OUTPUT_LEN: usize = 32;
 
 /// Derive a database encryption key from a passphrase using Argon2.
 /// 
@@ -74,10 +73,7 @@ pub fn verify_passphrase(passphrase: &str, data_dir: &Path) -> bool {
         return false;
     }
     
-    match derive_database_key(passphrase, data_dir) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    derive_database_key(passphrase, data_dir).is_ok()
 }
 
 #[cfg(test)]
