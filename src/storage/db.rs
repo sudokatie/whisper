@@ -20,10 +20,11 @@ pub struct Database {
 impl Database {
     /// Open or create encrypted database at path.
     /// 
-    /// The passphrase is used to encrypt the database file using SQLCipher.
-    /// If the database already exists, it will be opened with the passphrase.
-    /// If the passphrase is wrong, an error is returned.
-    pub fn open(path: &Path, passphrase: &str) -> Result<Self> {
+    /// The encryption_key should be derived using Argon2 from the user's passphrase.
+    /// Use `storage::derive_database_key()` to derive the key.
+    /// If the database already exists, it will be opened with the key.
+    /// If the key is wrong, an error is returned.
+    pub fn open(path: &Path, encryption_key: &str) -> Result<Self> {
         // Create parent directories if needed
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -33,14 +34,30 @@ impl Database {
         
         // Set the encryption key using SQLCipher PRAGMA
         // This must be done before any other database operations
-        if !passphrase.is_empty() {
-            conn.pragma_update(None, "key", passphrase)
-                .context("Failed to set encryption key")?;
+        // The key should be in format x'hexstring' from derive_database_key()
+        if !encryption_key.is_empty() {
+            conn.pragma_update(None, "key", encryption_key)
+                .context("Failed to set encryption key - wrong passphrase?")?;
         }
+        
+        // Verify the key is correct by trying to access the database
+        // SQLCipher returns an error on first query if key is wrong
+        // We use query_row instead of execute since SELECT returns results
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+            .context("Database authentication failed - incorrect passphrase")?;
         
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
+    }
+    
+    /// Open or create encrypted database using a passphrase.
+    /// 
+    /// This derives the encryption key using Argon2 and then opens the database.
+    /// The data_dir is used to store/load the salt file.
+    pub fn open_with_passphrase(path: &Path, passphrase: &str, data_dir: &Path) -> Result<Self> {
+        let key = super::encryption::derive_database_key(passphrase, data_dir)?;
+        Self::open(path, &key)
     }
 
     /// Open an in-memory database (for testing).

@@ -89,6 +89,14 @@ pub fn database_path(data_dir: &Path) -> PathBuf {
     data_dir.join(DATABASE_FILE)
 }
 
+/// Open the database with encrypted passphrase.
+/// Uses Argon2 key derivation for secure encryption.
+fn open_database(data_dir: &Path, passphrase: &str) -> Result<Database> {
+    let path = database_path(data_dir);
+    Database::open_with_passphrase(&path, passphrase, data_dir)
+        .context("Failed to open database - incorrect passphrase?")
+}
+
 /// Initialize a new identity.
 pub async fn handle_init(data_dir: &Path, passphrase: &str) -> Result<()> {
     // Create data directory if needed
@@ -110,8 +118,7 @@ pub async fn handle_init(data_dir: &Path, passphrase: &str) -> Result<()> {
     save_keypair(&keypair, &key_path, passphrase).context("Failed to save keypair")?;
 
     // Initialize encrypted database
-    let db_path = database_path(data_dir);
-    let _db = Database::open(&db_path, passphrase).context("Failed to initialize database")?;
+    let _db = open_database(data_dir, passphrase)?;
 
     println!("Identity created!");
     println!("Peer ID: {}", peer_id);
@@ -123,8 +130,7 @@ pub async fn handle_init(data_dir: &Path, passphrase: &str) -> Result<()> {
 
 /// Send a message to a contact.
 pub async fn handle_send(alias: &str, message: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     // Load our keypair
     let key_path = keypair_path(data_dir);
@@ -176,8 +182,7 @@ pub async fn handle_send(alias: &str, message: &str, data_dir: &Path, passphrase
 
 /// Start interactive chat with a contact.
 pub async fn handle_chat(alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     // Load our keypair
     let key_path = keypair_path(data_dir);
@@ -636,8 +641,7 @@ async fn run_group_tui_with_network(
 
 /// List all contacts.
 pub async fn handle_contacts(data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     let contacts = db.list_contacts()?;
 
@@ -662,8 +666,7 @@ pub async fn handle_contacts(data_dir: &Path, passphrase: &str) -> Result<()> {
 
 /// Add a new contact.
 pub async fn handle_add_contact(alias: &str, peer_id_str: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     // Parse peer ID
     let peer_id: PeerId = peer_id_str
@@ -700,8 +703,7 @@ pub async fn handle_status(data_dir: &Path, passphrase: &str) -> Result<()> {
     let peer_id = keypair_to_peer_id(&keypair);
     let public_key = export_public_key(&keypair);
 
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase)?;
+    let db = open_database(data_dir, passphrase)?;
     let contacts = db.list_contacts()?;
 
     println!("Whisper Status");
@@ -716,8 +718,7 @@ pub async fn handle_status(data_dir: &Path, passphrase: &str) -> Result<()> {
 
 /// Set trust level for a contact.
 pub async fn handle_trust(alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase)?;
+    let db = open_database(data_dir, passphrase)?;
 
     let mut contact = db
         .get_contact_by_alias(alias)?
@@ -733,8 +734,7 @@ pub async fn handle_trust(alias: &str, data_dir: &Path, passphrase: &str) -> Res
 
 /// Block a contact.
 pub async fn handle_block(alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase)?;
+    let db = open_database(data_dir, passphrase)?;
 
     let mut contact = db
         .get_contact_by_alias(alias)?
@@ -766,8 +766,7 @@ pub async fn handle_export_key(data_dir: &Path, passphrase: &str) -> Result<()> 
 
 /// Import a contact from a key file.
 pub async fn handle_import_contact(file: &Path, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     // Read public key from file
     let key_data = fs::read_to_string(file).context("Failed to read key file")?;
@@ -811,8 +810,7 @@ pub async fn handle_peers(data_dir: &Path, passphrase: &str) -> Result<()> {
         anyhow::bail!("No identity found. Run: whisper init");
     }
 
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     println!("Peer Status");
     println!("===========");
@@ -875,8 +873,7 @@ pub async fn handle_peers(data_dir: &Path, passphrase: &str) -> Result<()> {
 
 /// Create a new group.
 pub async fn handle_group_create(name: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     // Check if group already exists
     if db.get_group_by_name(name)?.is_some() {
@@ -900,8 +897,7 @@ pub async fn handle_group_create(name: &str, data_dir: &Path, passphrase: &str) 
 /// 
 /// This adds them to the group AND sends them the encrypted group key.
 pub async fn handle_group_invite(group_name: &str, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     // Load our keypair
     let key_path = keypair_path(data_dir);
@@ -962,8 +958,7 @@ pub async fn handle_group_invite(group_name: &str, alias: &str, data_dir: &Path,
 
 /// Open interactive group chat.
 pub async fn handle_group_chat(name: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     // Load our keypair
     let key_path = keypair_path(data_dir);
@@ -1013,8 +1008,7 @@ pub async fn handle_group_chat(name: &str, data_dir: &Path, passphrase: &str) ->
 
 /// List all groups.
 pub async fn handle_group_list(data_dir: &Path, passphrase: &str) -> Result<()> {
-    let db_path = database_path(data_dir);
-    let db = Database::open(&db_path, passphrase).context("Failed to open database")?;
+    let db = open_database(data_dir, passphrase)?;
 
     let groups = db.list_groups()?;
 
@@ -1073,7 +1067,7 @@ mod tests {
             .unwrap();
 
         // Verify it was added
-        let db = Database::open(&database_path(data_dir), "test").unwrap();
+        let db = open_database(data_dir, "test").unwrap();
         let contact = db.get_contact_by_alias("alice").unwrap();
         assert!(contact.is_some());
     }
@@ -1096,7 +1090,7 @@ mod tests {
             .unwrap();
 
         // Verify via database
-        let db = Database::open(&database_path(data_dir), "test").unwrap();
+        let db = open_database(data_dir, "test").unwrap();
         let contacts = db.list_contacts().unwrap();
         assert_eq!(contacts.len(), 2);
     }
@@ -1126,7 +1120,7 @@ mod tests {
 
         handle_trust("alice", data_dir, "test").await.unwrap();
 
-        let db = Database::open(&database_path(data_dir), "test").unwrap();
+        let db = open_database(data_dir, "test").unwrap();
         let contact = db.get_contact_by_alias("alice").unwrap().unwrap();
         assert!(matches!(contact.trust_level, TrustLevel::Trusted));
     }
@@ -1145,7 +1139,7 @@ mod tests {
 
         handle_block("alice", data_dir, "test").await.unwrap();
 
-        let db = Database::open(&database_path(data_dir), "test").unwrap();
+        let db = open_database(data_dir, "test").unwrap();
         let contact = db.get_contact_by_alias("alice").unwrap().unwrap();
         assert!(matches!(contact.trust_level, TrustLevel::Blocked));
     }
@@ -1202,7 +1196,7 @@ mod tests {
         handle_init(data_dir, "test").await.unwrap();
         handle_group_create("test-group", data_dir, "test").await.unwrap();
 
-        let db = Database::open(&database_path(data_dir), "test").unwrap();
+        let db = open_database(data_dir, "test").unwrap();
         let group = db.get_group_by_name("test-group").unwrap();
         assert!(group.is_some());
     }
@@ -1234,7 +1228,7 @@ mod tests {
 
         handle_group_invite("team", "alice", data_dir, "test").await.unwrap();
 
-        let db = Database::open(&database_path(data_dir), "test").unwrap();
+        let db = open_database(data_dir, "test").unwrap();
         let group = db.get_group_by_name("team").unwrap().unwrap();
         assert_eq!(group.members.len(), 1);
     }

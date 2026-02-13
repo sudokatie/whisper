@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["full"] }
 
 # Cryptography
 sodiumoxide = "0.2"
+argon2 = "0.5"
+rand = "0.8"
+hex = "0.4"
 
 # Database (SQLCipher for encryption at rest)
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }

@@ -9,7 +9,14 @@ use whisper::cli;
 use whisper::crypto::{decrypt_from_group, decrypt_message, encrypt_for_group, encrypt_message, generate_group_key};
 use whisper::identity::{generate_keypair, keypair_to_peer_id, TrustLevel};
 use whisper::message::{Message, MessageQueue, Recipient};
-use whisper::storage::Database;
+use whisper::storage::{Database, derive_database_key};
+
+/// Helper to open database with derived key for tests.
+fn open_test_db(data_dir: &std::path::Path, passphrase: &str) -> Database {
+    let db_path = data_dir.join("whisper.db");
+    let key = derive_database_key(passphrase, data_dir).unwrap();
+    Database::open(&db_path, &key).unwrap()
+}
 
 /// Test: Create identity and save to disk.
 #[tokio::test]
@@ -44,7 +51,7 @@ async fn add_contact_and_list() {
         .unwrap();
 
     // Verify via database
-    let db = Database::open(&data_dir.join("whisper.db"), "test").unwrap();
+    let db = open_test_db(data_dir, "test");
     let contacts = db.list_contacts().unwrap();
 
     assert_eq!(contacts.len(), 1);
@@ -136,7 +143,7 @@ async fn multiple_contacts_trust_levels() {
     cli::handle_block("eve", data_dir, "test").await.unwrap();
 
     // Verify
-    let db = Database::open(&data_dir.join("whisper.db"), "test").unwrap();
+    let db = open_test_db(data_dir, "test");
 
     let alice = db.get_contact_by_alias("alice").unwrap().unwrap();
     let bob = db.get_contact_by_alias("bob").unwrap().unwrap();
