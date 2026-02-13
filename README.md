@@ -77,7 +77,7 @@ Direct messages use X25519 sealed boxes (libsodium), providing:
 Group messages use XChaCha20-Poly1305 with a shared symmetric key distributed to members.
 
 ### Storage
-Messages are stored in SQLite. The database can be encrypted at rest using SQLCipher (optional).
+Messages are stored in SQLite, encrypted at rest using SQLCipher with Argon2 key derivation. Your passphrase derives a secure encryption key - database encryption is always enabled.
 
 ## Commands
 
@@ -103,7 +103,9 @@ Messages are stored in SQLite. The database can be encrypted at rest using SQLCi
 
 ```
 --data-dir <path>     Data directory (default: ~/.whisper)
---passphrase <pass>   Keypair passphrase (or set WHISPER_PASSPHRASE)
+--passphrase <pass>   Passphrase for encryption (or set WHISPER_PASSPHRASE)
+                      Required for all database operations. Used for both
+                      keypair encryption and database encryption (via Argon2).
 ```
 
 ## Architecture
