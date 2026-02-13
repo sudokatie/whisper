@@ -145,6 +145,19 @@ RUST_LOG=whisper=debug cargo run -- status
 cargo clippy
 ```
 
+## Testing
+
+```bash
+# Run all tests
+cargo test
+
+# Run network-specific tests
+cargo test --test network_test
+
+# Run integration tests
+cargo test --test integration_test
+```
+
 ## Contributing
 
 Pull requests welcome. Please run tests and clippy before submitting.
