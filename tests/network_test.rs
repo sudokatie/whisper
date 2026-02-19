@@ -149,21 +149,18 @@ async fn pending_messages_clear_on_connect() {
 
 /// Test: Two nodes can connect to each other.
 /// 
-/// NOTE: This test is complex because libp2p requires both swarms to be
-/// polled concurrently for TCP connections to complete. The test uses
-/// separate tokio tasks, but connection still times out - needs investigation
-/// into the swarm configuration and noise/yamux handshake behavior.
+/// NOTE: This test is challenging because libp2p's relay client adds
+/// complexity to the connection process. The TCP + Noise + Yamux
+/// handshake requires extensive swarm polling that's difficult to
+/// achieve in a synchronous test environment.
 /// 
-/// TODO: Investigate why TCP connections don't complete in test environment.
-/// Possible issues:
-/// - Noise handshake requires more swarm polling
-/// - Relay client behavior interfering
-/// - Test timeout too short for full handshake
-#[ignore = "Multi-node tests require investigation - connections timeout"]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Deferred pending:
+/// - libp2p test examples showing proper multi-node test patterns
+/// - Possibly a test-specific node without relay client
+/// - Or using libp2p's test utilities if available
+#[ignore = "Requires libp2p test infrastructure - connection handshake needs concurrent polling"]
+#[tokio::test]
 async fn two_nodes_can_connect() {
-    use tokio::sync::mpsc;
-
     let keypair1 = generate_keypair();
     let keypair2 = generate_keypair();
 
@@ -173,62 +170,45 @@ async fn two_nodes_can_connect() {
     let mut node1 = WhisperNode::new(keypair1).await.unwrap();
     let mut node2 = WhisperNode::new(keypair2).await.unwrap();
 
-    // Channel for node1 to report its listening address
-    let (addr_tx, mut addr_rx) = mpsc::channel::<Multiaddr>(1);
-    
-    // Channel for connection results
-    let (result_tx1, mut result_rx1) = mpsc::channel::<bool>(1);
-    let (result_tx2, mut result_rx2) = mpsc::channel::<bool>(1);
-
-    // Node 1 listens
+    // Node 1 listens on localhost
     let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
     node1.listen_on(listen_addr).unwrap();
 
-    // Spawn task for node1
-    let expected_peer1 = peer_id2;
-    tokio::spawn(async move {
-        loop {
-            if let Some(event) = node1.poll_event().await {
-                match event {
-                    NodeEvent::Listening(addr) => {
-                        let _ = addr_tx.send(addr).await;
-                    }
-                    NodeEvent::PeerConnected(peer) if peer == expected_peer1 => {
-                        let _ = result_tx1.send(true).await;
-                        return;
-                    }
-                    _ => {}
-                }
-            }
+    // Poll node1 until we get the listening address
+    let mut addr1: Option<Multiaddr> = None;
+    for _ in 0..100 {
+        if let Some(NodeEvent::Listening(addr)) = node1.poll_event().await {
+            addr1 = Some(addr);
+            break;
         }
-    });
-
-    // Wait for node1's listening address
-    let addr1 = timeout(Duration::from_secs(5), addr_rx.recv())
-        .await
-        .expect("Timeout waiting for listening address")
-        .expect("Should receive address");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let addr1 = addr1.expect("Node 1 should report listening address");
 
     // Node 2 dials node 1
     node2.dial(addr1).expect("Node 2 should dial node 1");
 
-    // Spawn task for node2
-    let expected_peer2 = peer_id1;
-    tokio::spawn(async move {
-        loop {
-            if let Some(NodeEvent::PeerConnected(peer)) = node2.poll_event().await {
-                if peer == expected_peer2 {
-                    let _ = result_tx2.send(true).await;
-                    return;
-                }
-            }
+    // This polling approach doesn't work because the relay client
+    // needs continuous concurrent polling during the handshake.
+    // Alternatives to explore:
+    // 1. Create test-only node without relay client
+    // 2. Use tokio::spawn for both nodes with shared state
+    // 3. Use libp2p's own testing patterns/utilities
+    
+    let mut node1_connected = false;
+    let mut node2_connected = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    while (!node1_connected || !node2_connected) && tokio::time::Instant::now() < deadline {
+        if let Some(NodeEvent::PeerConnected(peer)) = node1.poll_event().await {
+            if peer == peer_id2 { node1_connected = true; }
         }
-    });
+        if let Some(NodeEvent::PeerConnected(peer)) = node2.poll_event().await {
+            if peer == peer_id1 { node2_connected = true; }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
-    // Wait for both connections
-    let r1 = timeout(Duration::from_secs(10), result_rx1.recv()).await;
-    let r2 = timeout(Duration::from_secs(10), result_rx2.recv()).await;
-
-    assert!(r1.is_ok() && r1.unwrap().unwrap_or(false), "Node 1 should connect");
-    assert!(r2.is_ok() && r2.unwrap().unwrap_or(false), "Node 2 should connect");
+    assert!(node1_connected, "Node 1 should see node 2 connect");
+    assert!(node2_connected, "Node 2 should see node 1 connect");
 }
