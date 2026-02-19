@@ -52,10 +52,8 @@ async fn node_reports_listening_address() {
 
     let result = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(event) = node.poll_event().await {
-                if let NodeEvent::Listening(addr) = event {
-                    return addr;
-                }
+            if let Some(NodeEvent::Listening(addr)) = node.poll_event().await {
+                return addr;
             }
         }
     })
@@ -218,12 +216,10 @@ async fn two_nodes_can_connect() {
     let expected_peer2 = peer_id1;
     tokio::spawn(async move {
         loop {
-            if let Some(event) = node2.poll_event().await {
-                if let NodeEvent::PeerConnected(peer) = event {
-                    if peer == expected_peer2 {
-                        let _ = result_tx2.send(true).await;
-                        return;
-                    }
+            if let Some(NodeEvent::PeerConnected(peer)) = node2.poll_event().await {
+                if peer == expected_peer2 {
+                    let _ = result_tx2.send(true).await;
+                    return;
                 }
             }
         }

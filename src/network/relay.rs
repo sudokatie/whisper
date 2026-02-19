@@ -89,9 +89,8 @@ mod tests {
     #[test]
     fn is_behind_nat_returns_bool() {
         // Just verify the function runs without panicking
-        let result = is_behind_nat();
-        // Result should be a boolean (true or false)
-        assert!(result == true || result == false);
+        let _result = is_behind_nat();
+        // Function compiles and returns a bool, that's the test
     }
 
     #[test]
@@ -133,7 +132,9 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn relay_timeout_is_reasonable() {
+        // These assertions document the expected bounds on the constant
         assert!(RELAY_CONNECT_TIMEOUT_SECS >= 10);
         assert!(RELAY_CONNECT_TIMEOUT_SECS <= 120);
     }

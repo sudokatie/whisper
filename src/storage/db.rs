@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn add_group_member() {
         let db = Database::open_in_memory().unwrap();
-        let mut group = Group::new("Team".to_string(), vec![]);
+        let group = Group::new("Team".to_string(), vec![]);
         let peer = make_peer_id();
 
         db.create_group(&group).unwrap();

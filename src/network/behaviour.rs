@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn codec_is_default() {
-        let codec = MessageCodec::default();
+        let codec = MessageCodec;
         // Just verify it compiles and creates
         let _ = codec;
     }
