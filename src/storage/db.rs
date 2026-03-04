@@ -10,7 +10,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::identity::{Contact, TrustLevel};
-use crate::message::{Group, Message, MessageContent, MessageStatus, Recipient};
+use crate::message::{
+    FileChunk, FileTransfer, FileTransferStatus,
+    Group, Message, MessageContent, MessageStatus, Recipient,
+};
 
 /// SQLite database wrapper with SQLCipher encryption.
 pub struct Database {
@@ -529,6 +532,277 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // === File Transfer Operations ===
+
+    /// Insert a new file transfer.
+    pub fn insert_file_transfer(&self, transfer: &FileTransfer) -> Result<()> {
+        let to_peer = match &transfer.to {
+            Recipient::Direct(peer) => peer.to_string(),
+            Recipient::Group(id) => id.to_string(),
+        };
+        let status = format!("{:?}", transfer.status);
+
+        self.conn.execute(
+            "INSERT INTO file_transfers (id, from_peer, to_peer, filename, total_size, total_chunks, chunks_received, status, created_at, file_checksum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                transfer.id.to_string(),
+                transfer.from.to_string(),
+                to_peer,
+                transfer.filename,
+                transfer.total_size as i64,
+                transfer.total_chunks as i64,
+                transfer.chunks_received as i64,
+                status,
+                transfer.created_at.timestamp(),
+                transfer.file_checksum.as_slice(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get a file transfer by ID.
+    pub fn get_file_transfer(&self, id: &Uuid) -> Result<Option<FileTransfer>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_peer, to_peer, filename, total_size, total_chunks, chunks_received, status, created_at, file_checksum
+             FROM file_transfers WHERE id = ?1",
+        )?;
+
+        let result = stmt.query_row(params![id.to_string()], |row| {
+            Ok(FileTransferRow {
+                id: row.get(0)?,
+                from_peer: row.get(1)?,
+                to_peer: row.get(2)?,
+                filename: row.get(3)?,
+                total_size: row.get(4)?,
+                total_chunks: row.get(5)?,
+                chunks_received: row.get(6)?,
+                status: row.get(7)?,
+                created_at: row.get(8)?,
+                file_checksum: row.get(9)?,
+            })
+        }).optional()?;
+
+        match result {
+            Some(row) => Ok(Some(self.row_to_file_transfer(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Update file transfer status and chunk count.
+    pub fn update_file_transfer(&self, id: &Uuid, chunks_received: u32, status: &FileTransferStatus) -> Result<bool> {
+        let status_str = format!("{:?}", status);
+        let rows = self.conn.execute(
+            "UPDATE file_transfers SET chunks_received = ?1, status = ?2 WHERE id = ?3",
+            params![chunks_received as i64, status_str, id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// List file transfers with optional status filter.
+    pub fn list_file_transfers(&self, status: Option<&FileTransferStatus>) -> Result<Vec<FileTransfer>> {
+        let mut transfers = Vec::new();
+        
+        if let Some(s) = status {
+            let status_str = format!("{:?}", s);
+            let mut stmt = self.conn.prepare(
+                "SELECT id, from_peer, to_peer, filename, total_size, total_chunks, chunks_received, status, created_at, file_checksum
+                 FROM file_transfers WHERE status = ?1 ORDER BY created_at DESC",
+            )?;
+            
+            let rows = stmt.query_map(params![status_str], |row| {
+                Ok(FileTransferRow {
+                    id: row.get(0)?,
+                    from_peer: row.get(1)?,
+                    to_peer: row.get(2)?,
+                    filename: row.get(3)?,
+                    total_size: row.get(4)?,
+                    total_chunks: row.get(5)?,
+                    chunks_received: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                    file_checksum: row.get(9)?,
+                })
+            })?;
+            
+            for row in rows {
+                if let Ok(transfer) = self.row_to_file_transfer(row?) {
+                    transfers.push(transfer);
+                }
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, from_peer, to_peer, filename, total_size, total_chunks, chunks_received, status, created_at, file_checksum
+                 FROM file_transfers ORDER BY created_at DESC",
+            )?;
+            
+            let rows = stmt.query_map([], |row| {
+                Ok(FileTransferRow {
+                    id: row.get(0)?,
+                    from_peer: row.get(1)?,
+                    to_peer: row.get(2)?,
+                    filename: row.get(3)?,
+                    total_size: row.get(4)?,
+                    total_chunks: row.get(5)?,
+                    chunks_received: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                    file_checksum: row.get(9)?,
+                })
+            })?;
+            
+            for row in rows {
+                if let Ok(transfer) = self.row_to_file_transfer(row?) {
+                    transfers.push(transfer);
+                }
+            }
+        }
+        
+        Ok(transfers)
+    }
+
+    /// Insert a file chunk.
+    pub fn insert_file_chunk(&self, chunk: &FileChunk) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO file_chunks (transfer_id, chunk_index, data, checksum, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                chunk.transfer_id.to_string(),
+                chunk.chunk_index as i64,
+                chunk.data.as_slice(),
+                chunk.checksum.as_slice(),
+                Utc::now().timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get a file chunk.
+    pub fn get_file_chunk(&self, transfer_id: &Uuid, chunk_index: u32) -> Result<Option<FileChunk>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT transfer_id, chunk_index, data, checksum
+             FROM file_chunks WHERE transfer_id = ?1 AND chunk_index = ?2",
+        )?;
+
+        let result = stmt.query_row(
+            params![transfer_id.to_string(), chunk_index as i64],
+            |row| {
+                let data: Vec<u8> = row.get(2)?;
+                let checksum_vec: Vec<u8> = row.get(3)?;
+                let total_chunks: u32 = row.get::<_, i64>(1)? as u32;
+                Ok((data, checksum_vec, total_chunks))
+            },
+        ).optional()?;
+
+        match result {
+            Some((data, checksum_vec, _)) => {
+                let mut checksum = [0u8; 32];
+                if checksum_vec.len() == 32 {
+                    checksum.copy_from_slice(&checksum_vec);
+                }
+                Ok(Some(FileChunk {
+                    transfer_id: *transfer_id,
+                    chunk_index,
+                    total_chunks: 0, // Will be set from transfer metadata
+                    data,
+                    checksum,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get all chunks for a transfer.
+    pub fn get_file_chunks(&self, transfer_id: &Uuid) -> Result<Vec<FileChunk>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT chunk_index, data, checksum FROM file_chunks
+             WHERE transfer_id = ?1 ORDER BY chunk_index",
+        )?;
+
+        let rows = stmt.query_map(params![transfer_id.to_string()], |row| {
+            let chunk_index: i64 = row.get(0)?;
+            let data: Vec<u8> = row.get(1)?;
+            let checksum_vec: Vec<u8> = row.get(2)?;
+            Ok((chunk_index as u32, data, checksum_vec))
+        })?;
+
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (chunk_index, data, checksum_vec) = row?;
+            let mut checksum = [0u8; 32];
+            if checksum_vec.len() == 32 {
+                checksum.copy_from_slice(&checksum_vec);
+            }
+            chunks.push(FileChunk {
+                transfer_id: *transfer_id,
+                chunk_index,
+                total_chunks: chunks.len() as u32 + 1, // Placeholder
+                data,
+                checksum,
+            });
+        }
+        Ok(chunks)
+    }
+
+    /// Delete a file transfer and its chunks.
+    pub fn delete_file_transfer(&self, id: &Uuid) -> Result<bool> {
+        // Foreign key cascade will delete chunks
+        let rows = self.conn.execute(
+            "DELETE FROM file_transfers WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Reassemble file from chunks.
+    pub fn reassemble_file(&self, transfer_id: &Uuid) -> Result<Vec<u8>> {
+        let chunks = self.get_file_chunks(transfer_id)?;
+        let mut data = Vec::new();
+        for chunk in chunks {
+            data.extend(chunk.data);
+        }
+        Ok(data)
+    }
+
+    fn row_to_file_transfer(&self, row: FileTransferRow) -> Result<FileTransfer> {
+        use crate::message::{FileTransfer, FileTransferStatus};
+        
+        let id = Uuid::parse_str(&row.id)?;
+        let from: PeerId = row.from_peer.parse()?;
+        let to = if let Ok(peer) = row.to_peer.parse::<PeerId>() {
+            Recipient::Direct(peer)
+        } else {
+            Recipient::Group(Uuid::parse_str(&row.to_peer)?)
+        };
+        let created_at = Utc.timestamp_opt(row.created_at, 0).single().unwrap_or_else(Utc::now);
+        let status = match row.status.as_str() {
+            "Pending" => FileTransferStatus::Pending,
+            "InProgress" => FileTransferStatus::InProgress,
+            "Complete" => FileTransferStatus::Complete,
+            "Failed" => FileTransferStatus::Failed,
+            "Cancelled" => FileTransferStatus::Cancelled,
+            _ => FileTransferStatus::Pending,
+        };
+
+        let mut file_checksum = [0u8; 32];
+        if row.file_checksum.len() == 32 {
+            file_checksum.copy_from_slice(&row.file_checksum);
+        }
+
+        Ok(FileTransfer {
+            id,
+            from,
+            to,
+            filename: row.filename,
+            total_size: row.total_size as u64,
+            total_chunks: row.total_chunks as u32,
+            chunks_received: row.chunks_received as u32,
+            status,
+            created_at,
+            file_checksum,
+        })
+    }
 }
 
 struct MessageRow {
@@ -538,6 +812,19 @@ struct MessageRow {
     content: Vec<u8>,
     timestamp: i64,
     status: String,
+}
+
+struct FileTransferRow {
+    id: String,
+    from_peer: String,
+    to_peer: String,
+    filename: String,
+    total_size: i64,
+    total_chunks: i64,
+    chunks_received: i64,
+    status: String,
+    created_at: i64,
+    file_checksum: Vec<u8>,
 }
 
 #[cfg(test)]
