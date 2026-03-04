@@ -62,6 +62,162 @@ pub enum Recipient {
 pub enum MessageContent {
     Text(String),
     Receipt(Uuid, ReceiptType),
+    FileChunk(FileChunk),
+    FileComplete(FileTransferComplete),
+}
+
+/// File transfer status.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum FileTransferStatus {
+    Pending,
+    InProgress,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
+/// A chunk of a file being transferred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunk {
+    pub transfer_id: Uuid,
+    pub chunk_index: u32,
+    pub total_chunks: u32,
+    pub data: Vec<u8>,
+    pub checksum: [u8; 32],
+}
+
+impl FileChunk {
+    /// Default chunk size (64KB for relay compatibility).
+    pub const CHUNK_SIZE: usize = 64 * 1024;
+
+    /// Create a new file chunk.
+    pub fn new(transfer_id: Uuid, chunk_index: u32, total_chunks: u32, data: Vec<u8>) -> Self {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let checksum: [u8; 32] = hasher.finalize().into();
+        
+        Self {
+            transfer_id,
+            chunk_index,
+            total_chunks,
+            data,
+            checksum,
+        }
+    }
+
+    /// Verify the chunk checksum.
+    pub fn verify(&self) -> bool {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&self.data);
+        let computed: [u8; 32] = hasher.finalize().into();
+        computed == self.checksum
+    }
+}
+
+/// File transfer completion notification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTransferComplete {
+    pub transfer_id: Uuid,
+    pub filename: String,
+    pub total_size: u64,
+    pub file_checksum: [u8; 32],
+}
+
+/// Metadata for a file transfer.
+#[derive(Debug, Clone)]
+pub struct FileTransfer {
+    pub id: Uuid,
+    pub from: PeerId,
+    pub to: Recipient,
+    pub filename: String,
+    pub total_size: u64,
+    pub total_chunks: u32,
+    pub chunks_received: u32,
+    pub status: FileTransferStatus,
+    pub created_at: DateTime<Utc>,
+    pub file_checksum: [u8; 32],
+}
+
+impl FileTransfer {
+    /// Create a new outgoing file transfer.
+    pub fn new_outgoing(from: PeerId, to: Recipient, filename: String, data: &[u8]) -> Self {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let file_checksum: [u8; 32] = hasher.finalize().into();
+        
+        let total_size = data.len() as u64;
+        let total_chunks = ((total_size as usize + FileChunk::CHUNK_SIZE - 1) / FileChunk::CHUNK_SIZE) as u32;
+
+        Self {
+            id: Uuid::new_v4(),
+            from,
+            to,
+            filename,
+            total_size,
+            total_chunks,
+            chunks_received: 0,
+            status: FileTransferStatus::Pending,
+            created_at: Utc::now(),
+            file_checksum,
+        }
+    }
+
+    /// Create a new incoming file transfer from metadata.
+    pub fn new_incoming(
+        id: Uuid,
+        from: PeerId,
+        to: Recipient,
+        filename: String,
+        total_size: u64,
+        total_chunks: u32,
+        file_checksum: [u8; 32],
+    ) -> Self {
+        Self {
+            id,
+            from,
+            to,
+            filename,
+            total_size,
+            total_chunks,
+            chunks_received: 0,
+            status: FileTransferStatus::InProgress,
+            created_at: Utc::now(),
+            file_checksum,
+        }
+    }
+
+    /// Check if transfer is complete.
+    pub fn is_complete(&self) -> bool {
+        self.chunks_received >= self.total_chunks
+    }
+
+    /// Get progress as a percentage.
+    pub fn progress(&self) -> f32 {
+        if self.total_chunks == 0 {
+            return 100.0;
+        }
+        (self.chunks_received as f32 / self.total_chunks as f32) * 100.0
+    }
+
+    /// Split file data into chunks.
+    pub fn create_chunks(transfer_id: Uuid, data: &[u8]) -> Vec<FileChunk> {
+        let total_chunks = ((data.len() + FileChunk::CHUNK_SIZE - 1) / FileChunk::CHUNK_SIZE) as u32;
+        let mut chunks = Vec::new();
+
+        for (i, chunk_data) in data.chunks(FileChunk::CHUNK_SIZE).enumerate() {
+            chunks.push(FileChunk::new(
+                transfer_id,
+                i as u32,
+                total_chunks,
+                chunk_data.to_vec(),
+            ));
+        }
+
+        chunks
+    }
 }
 
 /// Receipt type.
@@ -206,5 +362,146 @@ mod tests {
         let mut group = Group::new("Test".to_string(), vec![]);
         let peer = make_peer_id();
         assert!(!group.remove_member(&peer));
+    }
+
+    // File transfer tests
+
+    #[test]
+    fn file_chunk_new() {
+        let transfer_id = Uuid::new_v4();
+        let data = vec![1, 2, 3, 4, 5];
+        let chunk = FileChunk::new(transfer_id, 0, 1, data.clone());
+
+        assert_eq!(chunk.transfer_id, transfer_id);
+        assert_eq!(chunk.chunk_index, 0);
+        assert_eq!(chunk.total_chunks, 1);
+        assert_eq!(chunk.data, data);
+    }
+
+    #[test]
+    fn file_chunk_verify_valid() {
+        let transfer_id = Uuid::new_v4();
+        let data = vec![1, 2, 3, 4, 5];
+        let chunk = FileChunk::new(transfer_id, 0, 1, data);
+
+        assert!(chunk.verify());
+    }
+
+    #[test]
+    fn file_chunk_verify_invalid() {
+        let transfer_id = Uuid::new_v4();
+        let data = vec![1, 2, 3, 4, 5];
+        let mut chunk = FileChunk::new(transfer_id, 0, 1, data);
+        
+        // Corrupt the data
+        chunk.data[0] = 99;
+        assert!(!chunk.verify());
+    }
+
+    #[test]
+    fn file_transfer_new_outgoing() {
+        let from = make_peer_id();
+        let to = make_peer_id();
+        let data = vec![0u8; 100];
+        let transfer = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "test.txt".to_string(),
+            &data,
+        );
+
+        assert_eq!(transfer.filename, "test.txt");
+        assert_eq!(transfer.total_size, 100);
+        assert_eq!(transfer.total_chunks, 1); // 100 bytes fits in one 64KB chunk
+        assert_eq!(transfer.chunks_received, 0);
+        assert_eq!(transfer.status, FileTransferStatus::Pending);
+    }
+
+    #[test]
+    fn file_transfer_large_file_chunks() {
+        let from = make_peer_id();
+        let to = make_peer_id();
+        // 200KB file = 4 chunks (64KB each, last one smaller)
+        let data = vec![0u8; 200 * 1024];
+        let transfer = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "large.bin".to_string(),
+            &data,
+        );
+
+        assert_eq!(transfer.total_chunks, 4);
+    }
+
+    #[test]
+    fn file_transfer_progress() {
+        let from = make_peer_id();
+        let to = make_peer_id();
+        let mut transfer = FileTransfer::new_incoming(
+            Uuid::new_v4(),
+            from,
+            Recipient::Direct(to),
+            "test.txt".to_string(),
+            100,
+            4,
+            [0; 32],
+        );
+
+        assert_eq!(transfer.progress(), 0.0);
+        
+        transfer.chunks_received = 2;
+        assert_eq!(transfer.progress(), 50.0);
+        
+        transfer.chunks_received = 4;
+        assert_eq!(transfer.progress(), 100.0);
+    }
+
+    #[test]
+    fn file_transfer_is_complete() {
+        let from = make_peer_id();
+        let to = make_peer_id();
+        let mut transfer = FileTransfer::new_incoming(
+            Uuid::new_v4(),
+            from,
+            Recipient::Direct(to),
+            "test.txt".to_string(),
+            100,
+            4,
+            [0; 32],
+        );
+
+        assert!(!transfer.is_complete());
+        
+        transfer.chunks_received = 4;
+        assert!(transfer.is_complete());
+    }
+
+    #[test]
+    fn file_transfer_create_chunks() {
+        let transfer_id = Uuid::new_v4();
+        let data = vec![0u8; 150 * 1024]; // 150KB = 3 chunks
+        let chunks = FileTransfer::create_chunks(transfer_id, &data);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert_eq!(chunks[1].chunk_index, 1);
+        assert_eq!(chunks[2].chunk_index, 2);
+        assert_eq!(chunks[0].total_chunks, 3);
+        
+        // First two chunks should be full size
+        assert_eq!(chunks[0].data.len(), FileChunk::CHUNK_SIZE);
+        assert_eq!(chunks[1].data.len(), FileChunk::CHUNK_SIZE);
+        // Last chunk should be smaller
+        assert_eq!(chunks[2].data.len(), 150 * 1024 - 2 * FileChunk::CHUNK_SIZE);
+    }
+
+    #[test]
+    fn file_transfer_small_file_single_chunk() {
+        let transfer_id = Uuid::new_v4();
+        let data = vec![1, 2, 3, 4, 5];
+        let chunks = FileTransfer::create_chunks(transfer_id, &data);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].data, data);
     }
 }
