@@ -18,6 +18,7 @@ Whisper doesn't work that way. Your messages travel directly between you and you
 - **NAT traversal**: Works behind firewalls using relay nodes.
 - **Persistent offline queue**: Messages survive restarts and deliver when contacts come online.
 - **Automatic key distribution**: Group keys are encrypted and sent to invited members.
+- **File transfer**: Send files of any size with chunking and integrity verification.
 - **Terminal UI**: Clean, fast interface that works anywhere.
 
 ## Installation
@@ -98,6 +99,10 @@ Messages are stored in SQLite, encrypted at rest using SQLCipher with Argon2 key
 | `group invite <name> <alias>` | Invite contact to group |
 | `group chat <name>` | Interactive group chat |
 | `group list` | List all groups |
+| `file send <alias> <path>` | Send a file to a contact |
+| `file list` | List file transfers |
+| `file status <id>` | Show transfer status |
+| `file cancel <id>` | Cancel a transfer |
 
 ### Options
 
