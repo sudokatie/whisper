@@ -90,6 +90,10 @@ pub enum Commands {
     /// Group commands
     #[command(subcommand)]
     Group(GroupCommands),
+
+    /// File transfer commands
+    #[command(subcommand)]
+    File(FileCommands),
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -116,6 +120,32 @@ pub enum GroupCommands {
 
     /// List all groups
     List,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum FileCommands {
+    /// Send a file to a contact
+    Send {
+        /// Contact alias
+        alias: String,
+        /// Path to the file
+        file: std::path::PathBuf,
+    },
+
+    /// List file transfers (in progress and recent)
+    List,
+
+    /// Show status of a specific transfer
+    Status {
+        /// Transfer ID
+        id: String,
+    },
+
+    /// Cancel an in-progress transfer
+    Cancel {
+        /// Transfer ID
+        id: String,
+    },
 }
 
 /// Expand ~ to home directory.
@@ -185,6 +215,22 @@ async fn main() -> Result<()> {
                 }
                 GroupCommands::List => {
                     cli::handle_group_list(&data_dir, &passphrase).await?;
+                }
+            }
+        }
+        Commands::File(cmd) => {
+            match cmd {
+                FileCommands::Send { alias, file } => {
+                    cli::handle_file_send(&alias, &file, &data_dir, &passphrase).await?;
+                }
+                FileCommands::List => {
+                    cli::handle_file_list(&data_dir, &passphrase).await?;
+                }
+                FileCommands::Status { id } => {
+                    cli::handle_file_status(&id, &data_dir, &passphrase).await?;
+                }
+                FileCommands::Cancel { id } => {
+                    cli::handle_file_cancel(&id, &data_dir, &passphrase).await?;
                 }
             }
         }

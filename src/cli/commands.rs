@@ -1025,6 +1025,171 @@ pub async fn handle_group_list(data_dir: &Path, passphrase: &str) -> Result<()> 
     Ok(())
 }
 
+// === File Transfer Commands ===
+
+use crate::message::{FileTransfer, FileTransferStatus};
+
+/// Send a file to a contact.
+pub async fn handle_file_send(alias: &str, file_path: &Path, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+    let keypair = load_keypair(&keypair_path(data_dir), passphrase)?;
+    let our_peer_id = keypair_to_peer_id(&keypair);
+
+    // Find the contact
+    let contact = db.get_contact_by_alias(alias)?
+        .with_context(|| format!("Contact '{}' not found", alias))?;
+
+    // Read the file
+    let file_data = fs::read(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+
+    let filename = file_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Create the transfer record
+    let transfer = FileTransfer::new_outgoing(
+        our_peer_id,
+        Recipient::Direct(contact.peer_id),
+        filename.clone(),
+        &file_data,
+    );
+
+    // Save to database
+    db.insert_file_transfer(&transfer)?;
+
+    // Create chunks and save them
+    let chunks = FileTransfer::create_chunks(transfer.id, &file_data);
+    for chunk in &chunks {
+        db.insert_file_chunk(chunk)?;
+    }
+
+    println!("File transfer created:");
+    println!("  ID: {}", transfer.id);
+    println!("  File: {}", filename);
+    println!("  Size: {} bytes", file_data.len());
+    println!("  Chunks: {}", chunks.len());
+    println!();
+    println!("Transfer queued. Use 'whisper file status {}' to check progress.", transfer.id);
+    println!();
+    println!("Note: Network transfer not yet implemented. File chunks are stored locally.");
+
+    Ok(())
+}
+
+/// List file transfers.
+pub async fn handle_file_list(data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+
+    let transfers = db.list_file_transfers(None)?;
+
+    if transfers.is_empty() {
+        println!("No file transfers.");
+        return Ok(());
+    }
+
+    println!("File transfers:");
+    println!();
+
+    for transfer in transfers {
+        let status_str = match transfer.status {
+            FileTransferStatus::Pending => "Pending",
+            FileTransferStatus::InProgress => "In Progress",
+            FileTransferStatus::Complete => "Complete",
+            FileTransferStatus::Failed => "Failed",
+            FileTransferStatus::Cancelled => "Cancelled",
+        };
+
+        let direction = if transfer.chunks_received == 0 && transfer.status == FileTransferStatus::Pending {
+            "outgoing"
+        } else {
+            "incoming"
+        };
+
+        println!("  {} [{}] ({}) - {:.1}%",
+            transfer.filename,
+            status_str,
+            direction,
+            transfer.progress()
+        );
+        println!("    ID: {}", transfer.id);
+        println!("    Size: {} bytes ({} chunks)", transfer.total_size, transfer.total_chunks);
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Show status of a specific transfer.
+pub async fn handle_file_status(id_str: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+
+    let id = uuid::Uuid::parse_str(id_str)
+        .with_context(|| format!("Invalid transfer ID: {}", id_str))?;
+
+    let transfer = db.get_file_transfer(&id)?
+        .with_context(|| format!("Transfer not found: {}", id))?;
+
+    let status_str = match transfer.status {
+        FileTransferStatus::Pending => "Pending",
+        FileTransferStatus::InProgress => "In Progress",
+        FileTransferStatus::Complete => "Complete",
+        FileTransferStatus::Failed => "Failed",
+        FileTransferStatus::Cancelled => "Cancelled",
+    };
+
+    println!("File Transfer Status:");
+    println!();
+    println!("  ID: {}", transfer.id);
+    println!("  File: {}", transfer.filename);
+    println!("  Size: {} bytes", transfer.total_size);
+    println!("  Status: {}", status_str);
+    println!("  Progress: {:.1}% ({}/{} chunks)",
+        transfer.progress(),
+        transfer.chunks_received,
+        transfer.total_chunks
+    );
+    println!("  Created: {}", transfer.created_at);
+
+    if transfer.status == FileTransferStatus::Complete {
+        println!();
+        println!("Transfer complete. File can be reassembled.");
+    }
+
+    Ok(())
+}
+
+/// Cancel an in-progress transfer.
+pub async fn handle_file_cancel(id_str: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+
+    let id = uuid::Uuid::parse_str(id_str)
+        .with_context(|| format!("Invalid transfer ID: {}", id_str))?;
+
+    let transfer = db.get_file_transfer(&id)?
+        .with_context(|| format!("Transfer not found: {}", id))?;
+
+    match transfer.status {
+        FileTransferStatus::Complete => {
+            println!("Transfer already complete. Cannot cancel.");
+            return Ok(());
+        }
+        FileTransferStatus::Cancelled => {
+            println!("Transfer already cancelled.");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Update status to cancelled
+    db.update_file_transfer(&id, transfer.chunks_received, &FileTransferStatus::Cancelled)?;
+
+    println!("Transfer cancelled: {}", transfer.filename);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1315,5 +1480,122 @@ mod tests {
         assert!(parse_receipt(b"RCPT:D:123").is_none());
         // Invalid type
         assert!(parse_receipt(b"RCPT:X:12345678-1234-1234-1234-123456789012").is_none());
+    }
+
+    // File transfer tests
+
+    #[tokio::test]
+    async fn file_list_empty() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+        
+        // Should not error on empty list
+        handle_file_list(data_dir, "test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_send_creates_transfer() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+
+        // Add a contact first
+        let peer_id = PeerId::random();
+        handle_add_contact("bob", &peer_id.to_string(), data_dir, "test")
+            .await
+            .unwrap();
+
+        // Create a test file
+        let test_file = temp.path().join("test.txt");
+        fs::write(&test_file, "Hello, this is test content!").unwrap();
+
+        // Send the file
+        handle_file_send("bob", &test_file, data_dir, "test")
+            .await
+            .unwrap();
+
+        // Verify transfer was created
+        let db = open_database(data_dir, "test").unwrap();
+        let transfers = db.list_file_transfers(None).unwrap();
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].filename, "test.txt");
+    }
+
+    #[tokio::test]
+    async fn file_status_shows_transfer() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+
+        // Add a contact
+        let peer_id = PeerId::random();
+        handle_add_contact("bob", &peer_id.to_string(), data_dir, "test")
+            .await
+            .unwrap();
+
+        // Create and send a file
+        let test_file = temp.path().join("data.bin");
+        fs::write(&test_file, vec![0u8; 1000]).unwrap();
+        handle_file_send("bob", &test_file, data_dir, "test").await.unwrap();
+
+        // Get the transfer ID
+        let db = open_database(data_dir, "test").unwrap();
+        let transfers = db.list_file_transfers(None).unwrap();
+        let transfer_id = transfers[0].id.to_string();
+
+        // Check status (should not error)
+        handle_file_status(&transfer_id, data_dir, "test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_cancel_works() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+
+        // Add a contact
+        let peer_id = PeerId::random();
+        handle_add_contact("bob", &peer_id.to_string(), data_dir, "test")
+            .await
+            .unwrap();
+
+        // Create and send a file
+        let test_file = temp.path().join("cancel_test.txt");
+        fs::write(&test_file, "test content").unwrap();
+        handle_file_send("bob", &test_file, data_dir, "test").await.unwrap();
+
+        // Get the transfer ID
+        let db = open_database(data_dir, "test").unwrap();
+        let transfers = db.list_file_transfers(None).unwrap();
+        let transfer_id = transfers[0].id.to_string();
+        drop(db);
+
+        // Cancel it
+        handle_file_cancel(&transfer_id, data_dir, "test").await.unwrap();
+
+        // Verify status changed
+        let db = open_database(data_dir, "test").unwrap();
+        let transfer = db.get_file_transfer(&transfers[0].id).unwrap().unwrap();
+        assert_eq!(transfer.status, FileTransferStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn file_send_fails_unknown_contact() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+
+        handle_init(data_dir, "test").await.unwrap();
+
+        let test_file = temp.path().join("test.txt");
+        fs::write(&test_file, "content").unwrap();
+
+        // Should fail - contact doesn't exist
+        let result = handle_file_send("unknown", &test_file, data_dir, "test").await;
+        assert!(result.is_err());
     }
 }
