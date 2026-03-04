@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bincode;
 use chrono::Utc;
 use crossterm::{
     event::{self, Event},
@@ -28,6 +29,12 @@ use crate::crypto::{
 
 /// Wire message prefix for receipts.
 const RECEIPT_PREFIX: &[u8] = b"RCPT:";
+
+/// Wire message prefix for file chunks.
+const FILE_CHUNK_PREFIX: &[u8] = b"FILE:";
+
+/// Wire message prefix for file transfer completion.
+const FILE_COMPLETE_PREFIX: &[u8] = b"FDNE:";
 
 /// Parse a wire message to check if it's a receipt.
 /// Returns Some((message_id, receipt_type)) if it's a receipt, None otherwise.
@@ -1027,7 +1034,7 @@ pub async fn handle_group_list(data_dir: &Path, passphrase: &str) -> Result<()> 
 
 // === File Transfer Commands ===
 
-use crate::message::{FileTransfer, FileTransferStatus};
+use crate::message::{FileTransfer, FileTransferComplete, FileTransferStatus};
 
 /// Send a file to a contact.
 pub async fn handle_file_send(alias: &str, file_path: &Path, data_dir: &Path, passphrase: &str) -> Result<()> {
@@ -1071,9 +1078,69 @@ pub async fn handle_file_send(alias: &str, file_path: &Path, data_dir: &Path, pa
     println!("  Size: {} bytes", file_data.len());
     println!("  Chunks: {}", chunks.len());
     println!();
-    println!("Transfer queued. Use 'whisper file status {}' to check progress.", transfer.id);
+
+    // Try to send over network if contact has public key
+    if !contact.public_key.is_empty() {
+        println!("Sending file to {}...", alias);
+        
+        // Convert Ed25519 public key to X25519 for encryption
+        let recipient_pk = match ed25519_pk_to_x25519(&contact.public_key) {
+            Ok(pk) => pk,
+            Err(_) => {
+                println!("Warning: Could not convert contact's public key. Chunks stored locally only.");
+                println!("Transfer queued. Use 'whisper file status {}' to check progress.", transfer.id);
+                return Ok(());
+            }
+        };
+
+        // Create and start network node
+        let mut node = WhisperNode::new(keypair.clone()).await.context("Failed to create network node")?;
+        node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+        
+        // Send each chunk
+        let total = chunks.len();
+        for (i, chunk) in chunks.iter().enumerate() {
+            // Serialize the chunk
+            let chunk_data = bincode::serialize(chunk)?;
+            
+            // Create wire message: FILE:<chunk_data>
+            let mut wire_msg = FILE_CHUNK_PREFIX.to_vec();
+            wire_msg.extend_from_slice(&chunk_data);
+            
+            // Encrypt for recipient
+            let encrypted = encrypt_message(&wire_msg, &recipient_pk)?;
+            
+            // Send via network
+            node.send_message(contact.peer_id, encrypted);
+            
+            // Progress indicator
+            let progress = ((i + 1) as f32 / total as f32 * 100.0) as u32;
+            print!("\r  Sending chunk {}/{} ({}%)", i + 1, total, progress);
+            io::Write::flush(&mut io::stdout())?;
+        }
+        
+        // Send completion notification
+        let complete = FileTransferComplete {
+            transfer_id: transfer.id,
+            filename: filename.clone(),
+            total_size: transfer.total_size,
+            file_checksum: transfer.file_checksum,
+        };
+        let complete_data = bincode::serialize(&complete)?;
+        let mut wire_msg = FILE_COMPLETE_PREFIX.to_vec();
+        wire_msg.extend_from_slice(&complete_data);
+        let encrypted = encrypt_message(&wire_msg, &recipient_pk)?;
+        node.send_message(contact.peer_id, encrypted);
+        
+        println!("\n  File transfer queued for delivery.");
+        println!("  Chunks will be sent when peer is online.");
+    } else {
+        println!("Warning: Contact has no public key stored. Cannot encrypt file.");
+        println!("Use 'whisper import-contact' to add their public key.");
+    }
+
     println!();
-    println!("Note: Network transfer not yet implemented. File chunks are stored locally.");
+    println!("Use 'whisper file status {}' to check progress.", transfer.id);
 
     Ok(())
 }
