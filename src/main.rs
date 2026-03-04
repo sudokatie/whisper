@@ -146,6 +146,12 @@ pub enum FileCommands {
         /// Transfer ID
         id: String,
     },
+
+    /// Resume an interrupted transfer
+    Resume {
+        /// Transfer ID
+        id: String,
+    },
 }
 
 /// Expand ~ to home directory.
@@ -231,6 +237,9 @@ async fn main() -> Result<()> {
                 }
                 FileCommands::Cancel { id } => {
                     cli::handle_file_cancel(&id, &data_dir, &passphrase).await?;
+                }
+                FileCommands::Resume { id } => {
+                    cli::handle_file_resume(&id, &data_dir, &passphrase).await?;
                 }
             }
         }
