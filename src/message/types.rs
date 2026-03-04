@@ -149,7 +149,7 @@ impl FileTransfer {
         let file_checksum: [u8; 32] = hasher.finalize().into();
         
         let total_size = data.len() as u64;
-        let total_chunks = ((total_size as usize + FileChunk::CHUNK_SIZE - 1) / FileChunk::CHUNK_SIZE) as u32;
+        let total_chunks = (total_size as usize).div_ceil(FileChunk::CHUNK_SIZE) as u32;
 
         Self {
             id: Uuid::new_v4(),
@@ -204,7 +204,7 @@ impl FileTransfer {
 
     /// Split file data into chunks.
     pub fn create_chunks(transfer_id: Uuid, data: &[u8]) -> Vec<FileChunk> {
-        let total_chunks = ((data.len() + FileChunk::CHUNK_SIZE - 1) / FileChunk::CHUNK_SIZE) as u32;
+        let total_chunks = data.len().div_ceil(FileChunk::CHUNK_SIZE) as u32;
         let mut chunks = Vec::new();
 
         for (i, chunk_data) in data.chunks(FileChunk::CHUNK_SIZE).enumerate() {
