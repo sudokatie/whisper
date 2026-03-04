@@ -218,6 +218,38 @@ impl FileTransfer {
 
         chunks
     }
+
+    /// Reassemble a file from its chunks.
+    /// Chunks must be sorted by chunk_index.
+    pub fn reassemble_file(chunks: &[FileChunk]) -> anyhow::Result<Vec<u8>> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Sort chunks by index
+        let mut sorted: Vec<_> = chunks.to_vec();
+        sorted.sort_by_key(|c| c.chunk_index);
+
+        // Verify we have all chunks
+        let expected = sorted[0].total_chunks;
+        if sorted.len() != expected as usize {
+            anyhow::bail!("Missing chunks: have {}, expected {}", sorted.len(), expected);
+        }
+
+        // Verify all checksums and reassemble
+        let mut data = Vec::new();
+        for (i, chunk) in sorted.iter().enumerate() {
+            if chunk.chunk_index != i as u32 {
+                anyhow::bail!("Missing chunk {}", i);
+            }
+            if !chunk.verify() {
+                anyhow::bail!("Chunk {} failed checksum verification", i);
+            }
+            data.extend_from_slice(&chunk.data);
+        }
+
+        Ok(data)
+    }
 }
 
 /// Receipt type.
@@ -493,6 +525,49 @@ mod tests {
         assert_eq!(chunks[1].data.len(), FileChunk::CHUNK_SIZE);
         // Last chunk should be smaller
         assert_eq!(chunks[2].data.len(), 150 * 1024 - 2 * FileChunk::CHUNK_SIZE);
+    }
+
+    #[test]
+    fn file_transfer_reassemble() {
+        let transfer_id = Uuid::new_v4();
+        let original_data: Vec<u8> = (0..200_000).map(|i| (i % 256) as u8).collect();
+        
+        // Create chunks
+        let chunks = FileTransfer::create_chunks(transfer_id, &original_data);
+        assert_eq!(chunks.len(), 4); // 200KB / 64KB = ~3.1 = 4 chunks
+        
+        // Reassemble
+        let reassembled = FileTransfer::reassemble_file(&chunks).unwrap();
+        
+        assert_eq!(reassembled.len(), original_data.len());
+        assert_eq!(reassembled, original_data);
+    }
+
+    #[test]
+    fn file_transfer_reassemble_out_of_order() {
+        let transfer_id = Uuid::new_v4();
+        let original_data: Vec<u8> = (0..150_000).map(|i| (i % 256) as u8).collect();
+        
+        // Create chunks and shuffle
+        let mut chunks = FileTransfer::create_chunks(transfer_id, &original_data);
+        chunks.reverse(); // Put them in reverse order
+        
+        // Should still reassemble correctly
+        let reassembled = FileTransfer::reassemble_file(&chunks).unwrap();
+        
+        assert_eq!(reassembled, original_data);
+    }
+
+    #[test]
+    fn file_transfer_reassemble_missing_chunk() {
+        let transfer_id = Uuid::new_v4();
+        let data = vec![0u8; 150 * 1024];
+        
+        let mut chunks = FileTransfer::create_chunks(transfer_id, &data);
+        chunks.remove(1); // Remove middle chunk
+        
+        let result = FileTransfer::reassemble_file(&chunks);
+        assert!(result.is_err());
     }
 
     #[test]

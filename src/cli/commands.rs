@@ -427,6 +427,57 @@ async fn run_tui_with_network(
                             continue;
                         }
 
+                        // Check if this is a file chunk
+                        if decrypted.starts_with(FILE_CHUNK_PREFIX) {
+                            if let Ok(chunk) = bincode::deserialize::<crate::message::FileChunk>(&decrypted[FILE_CHUNK_PREFIX.len()..]) {
+                                // Verify checksum
+                                if chunk.verify() {
+                                    // Save chunk to database
+                                    let _ = db.insert_file_chunk(&chunk);
+                                    // Update transfer progress if it exists
+                                    if let Ok(Some(mut transfer)) = db.get_file_transfer(&chunk.transfer_id) {
+                                        transfer.chunks_received = transfer.chunks_received.saturating_add(1);
+                                        let _ = db.update_file_transfer_progress(&transfer.id, transfer.chunks_received);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Check if this is a file transfer completion
+                        if decrypted.starts_with(FILE_COMPLETE_PREFIX) {
+                            if let Ok(complete) = bincode::deserialize::<FileTransferComplete>(&decrypted[FILE_COMPLETE_PREFIX.len()..]) {
+                                // Create incoming transfer record if not exists
+                                let transfer = FileTransfer::new_incoming(
+                                    complete.transfer_id,
+                                    from,
+                                    Recipient::Direct(app.our_peer_id.unwrap_or_else(PeerId::random)),
+                                    complete.filename.clone(),
+                                    complete.total_size,
+                                    ((complete.total_size as usize).div_ceil(crate::message::FileChunk::CHUNK_SIZE)) as u32,
+                                    complete.file_checksum,
+                                );
+                                let _ = db.insert_file_transfer(&transfer);
+                                // Try to reassemble if we have all chunks
+                                if let Ok(chunks) = db.get_file_chunks(&complete.transfer_id) {
+                                    if chunks.len() as u32 >= transfer.total_chunks {
+                                        // Reassemble and verify
+                                        if let Ok(data) = crate::message::FileTransfer::reassemble_file(&chunks) {
+                                            use sha2::{Sha256, Digest};
+                                            let mut hasher = Sha256::new();
+                                            hasher.update(&data);
+                                            let checksum: [u8; 32] = hasher.finalize().into();
+                                            if checksum == complete.file_checksum {
+                                                // File verified! Mark as complete
+                                                let _ = db.update_file_transfer_status(&complete.transfer_id, FileTransferStatus::Complete);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
                         // Regular text message
                         let text = String::from_utf8_lossy(&decrypted).to_string();
 

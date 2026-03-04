@@ -600,6 +600,25 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Update only the progress (chunks received) of a file transfer.
+    pub fn update_file_transfer_progress(&self, id: &Uuid, chunks_received: u32) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE file_transfers SET chunks_received = ?1 WHERE id = ?2",
+            params![chunks_received as i64, id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Update only the status of a file transfer.
+    pub fn update_file_transfer_status(&self, id: &Uuid, status: FileTransferStatus) -> Result<bool> {
+        let status_str = format!("{:?}", status);
+        let rows = self.conn.execute(
+            "UPDATE file_transfers SET status = ?1 WHERE id = ?2",
+            params![status_str, id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// List file transfers with optional status filter.
     pub fn list_file_transfers(&self, status: Option<&FileTransferStatus>) -> Result<Vec<FileTransfer>> {
         let mut transfers = Vec::new();
