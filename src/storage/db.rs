@@ -1125,4 +1125,216 @@ mod tests {
             assert_eq!(pending[0].2, b"persist me");
         }
     }
+
+    // File transfer tests
+
+    #[test]
+    fn insert_and_get_file_transfer() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+
+        let data = vec![0u8; 1000];
+        let transfer = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "test.txt".to_string(),
+            &data,
+        );
+
+        db.insert_file_transfer(&transfer).unwrap();
+
+        let loaded = db.get_file_transfer(&transfer.id).unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.filename, "test.txt");
+        assert_eq!(loaded.total_size, 1000);
+    }
+
+    #[test]
+    fn update_file_transfer_status() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+
+        let data = vec![0u8; 500];
+        let transfer = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "update.txt".to_string(),
+            &data,
+        );
+
+        db.insert_file_transfer(&transfer).unwrap();
+        
+        // Update status
+        db.update_file_transfer(&transfer.id, 1, &FileTransferStatus::Complete).unwrap();
+
+        let loaded = db.get_file_transfer(&transfer.id).unwrap().unwrap();
+        assert_eq!(loaded.status, FileTransferStatus::Complete);
+        assert_eq!(loaded.chunks_received, 1);
+    }
+
+    #[test]
+    fn list_file_transfers() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+
+        // Create multiple transfers
+        for i in 0..3 {
+            let transfer = FileTransfer::new_outgoing(
+                from,
+                Recipient::Direct(to),
+                format!("file{}.txt", i),
+                &vec![0u8; 100],
+            );
+            db.insert_file_transfer(&transfer).unwrap();
+        }
+
+        let all = db.list_file_transfers(None).unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn list_file_transfers_by_status() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+
+        // Create pending transfer
+        let pending = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "pending.txt".to_string(),
+            &vec![0u8; 100],
+        );
+        db.insert_file_transfer(&pending).unwrap();
+
+        // Create and complete another transfer
+        let complete = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "complete.txt".to_string(),
+            &vec![0u8; 100],
+        );
+        db.insert_file_transfer(&complete).unwrap();
+        db.update_file_transfer(&complete.id, 1, &FileTransferStatus::Complete).unwrap();
+
+        // Filter by pending
+        let pending_only = db.list_file_transfers(Some(&FileTransferStatus::Pending)).unwrap();
+        assert_eq!(pending_only.len(), 1);
+        assert_eq!(pending_only[0].filename, "pending.txt");
+
+        // Filter by complete
+        let complete_only = db.list_file_transfers(Some(&FileTransferStatus::Complete)).unwrap();
+        assert_eq!(complete_only.len(), 1);
+        assert_eq!(complete_only[0].filename, "complete.txt");
+    }
+
+    #[test]
+    fn insert_and_get_file_chunk() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+
+        // Create parent transfer first
+        let transfer = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "chunk_test.txt".to_string(),
+            &vec![1, 2, 3, 4, 5],
+        );
+        db.insert_file_transfer(&transfer).unwrap();
+
+        let chunk = FileChunk::new(transfer.id, 0, 1, vec![1, 2, 3, 4, 5]);
+        db.insert_file_chunk(&chunk).unwrap();
+
+        let loaded = db.get_file_chunk(&transfer.id, 0).unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.data, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn get_all_file_chunks() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+
+        // Create parent transfer
+        let transfer = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "multi_chunk.txt".to_string(),
+            &vec![0u8; 30],
+        );
+        db.insert_file_transfer(&transfer).unwrap();
+
+        // Insert 3 chunks
+        for i in 0..3 {
+            let chunk = FileChunk::new(transfer.id, i, 3, vec![i as u8; 10]);
+            db.insert_file_chunk(&chunk).unwrap();
+        }
+
+        let chunks = db.get_file_chunks(&transfer.id).unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert_eq!(chunks[1].chunk_index, 1);
+        assert_eq!(chunks[2].chunk_index, 2);
+    }
+
+    #[test]
+    fn reassemble_file_from_chunks() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+
+        // Original data
+        let original = b"Hello, World! This is a test file.";
+        
+        // Create parent transfer
+        let transfer = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "reassemble.txt".to_string(),
+            original,
+        );
+        db.insert_file_transfer(&transfer).unwrap();
+
+        // Split into chunks
+        let chunk1 = FileChunk::new(transfer.id, 0, 2, original[..17].to_vec());
+        let chunk2 = FileChunk::new(transfer.id, 1, 2, original[17..].to_vec());
+
+        db.insert_file_chunk(&chunk1).unwrap();
+        db.insert_file_chunk(&chunk2).unwrap();
+
+        let reassembled = db.reassemble_file(&transfer.id).unwrap();
+        assert_eq!(reassembled, original);
+    }
+
+    #[test]
+    fn delete_file_transfer() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+
+        let transfer = FileTransfer::new_outgoing(
+            from,
+            Recipient::Direct(to),
+            "delete_me.txt".to_string(),
+            &vec![0u8; 100],
+        );
+        db.insert_file_transfer(&transfer).unwrap();
+
+        // Add some chunks
+        let chunk = FileChunk::new(transfer.id, 0, 1, vec![1, 2, 3]);
+        db.insert_file_chunk(&chunk).unwrap();
+
+        // Delete
+        assert!(db.delete_file_transfer(&transfer.id).unwrap());
+
+        // Verify gone
+        assert!(db.get_file_transfer(&transfer.id).unwrap().is_none());
+    }
 }
