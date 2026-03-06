@@ -5,38 +5,88 @@ use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Role of a group member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemberRole {
+    Member,
+    Admin,
+}
+
+impl Default for MemberRole {
+    fn default() -> Self {
+        Self::Member
+    }
+}
+
+impl std::fmt::Display for MemberRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Member => write!(f, "member"),
+            Self::Admin => write!(f, "admin"),
+        }
+    }
+}
+
+impl std::str::FromStr for MemberRole {
+    type Err = String;
+    
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "member" => Ok(Self::Member),
+            "admin" => Ok(Self::Admin),
+            _ => Err(format!("Invalid role: {}", s)),
+        }
+    }
+}
+
+/// A group member with their role.
+#[derive(Debug, Clone)]
+pub struct GroupMember {
+    pub peer_id: PeerId,
+    pub role: MemberRole,
+}
+
 /// A group chat.
 #[derive(Debug, Clone)]
 pub struct Group {
     pub id: Uuid,
     pub name: String,
-    pub members: Vec<PeerId>,
+    pub description: Option<String>,
+    pub owner: Option<PeerId>,
+    pub members: Vec<GroupMember>,
     pub symmetric_key: Vec<u8>,
     pub created_at: DateTime<Utc>,
 }
 
 impl Group {
-    /// Create a new group.
-    pub fn new(name: String, symmetric_key: Vec<u8>) -> Self {
+    /// Create a new group with an owner.
+    pub fn new(name: String, symmetric_key: Vec<u8>, owner: Option<PeerId>) -> Self {
         Self {
             id: Uuid::new_v4(),
             name,
+            description: None,
+            owner,
             members: Vec::new(),
             symmetric_key,
             created_at: Utc::now(),
         }
     }
 
-    /// Add a member to the group.
+    /// Add a member to the group with a role.
     pub fn add_member(&mut self, peer_id: PeerId) {
-        if !self.members.contains(&peer_id) {
-            self.members.push(peer_id);
+        self.add_member_with_role(peer_id, MemberRole::Member);
+    }
+
+    /// Add a member with a specific role.
+    pub fn add_member_with_role(&mut self, peer_id: PeerId, role: MemberRole) {
+        if !self.is_member(&peer_id) {
+            self.members.push(GroupMember { peer_id, role });
         }
     }
 
     /// Remove a member from the group.
     pub fn remove_member(&mut self, peer_id: &PeerId) -> bool {
-        if let Some(pos) = self.members.iter().position(|p| p == peer_id) {
+        if let Some(pos) = self.members.iter().position(|m| &m.peer_id == peer_id) {
             self.members.remove(pos);
             true
         } else {
@@ -46,7 +96,62 @@ impl Group {
 
     /// Check if a peer is a member.
     pub fn is_member(&self, peer_id: &PeerId) -> bool {
-        self.members.contains(peer_id)
+        self.members.iter().any(|m| &m.peer_id == peer_id)
+    }
+
+    /// Get member peer IDs only.
+    pub fn member_peer_ids(&self) -> Vec<PeerId> {
+        self.members.iter().map(|m| m.peer_id).collect()
+    }
+
+    /// Check if a peer is the owner.
+    pub fn is_owner(&self, peer_id: &PeerId) -> bool {
+        self.owner.as_ref() == Some(peer_id)
+    }
+
+    /// Check if a peer is an admin.
+    pub fn is_admin(&self, peer_id: &PeerId) -> bool {
+        self.members.iter().any(|m| &m.peer_id == peer_id && m.role == MemberRole::Admin)
+    }
+
+    /// Check if a peer can manage the group (owner or admin).
+    pub fn can_manage(&self, peer_id: &PeerId) -> bool {
+        self.is_owner(peer_id) || self.is_admin(peer_id)
+    }
+
+    /// Get a member's role.
+    pub fn get_member_role(&self, peer_id: &PeerId) -> Option<MemberRole> {
+        self.members.iter().find(|m| &m.peer_id == peer_id).map(|m| m.role)
+    }
+
+    /// Set a member's role.
+    pub fn set_member_role(&mut self, peer_id: &PeerId, role: MemberRole) -> bool {
+        if let Some(member) = self.members.iter_mut().find(|m| &m.peer_id == peer_id) {
+            member.role = role;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Transfer ownership to another member.
+    pub fn transfer_ownership(&mut self, new_owner: &PeerId) -> bool {
+        if self.is_member(new_owner) {
+            self.owner = Some(*new_owner);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Update group name.
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    /// Update group description.
+    pub fn set_description(&mut self, description: Option<String>) {
+        self.description = description;
     }
 }
 
@@ -356,24 +461,41 @@ mod tests {
 
     #[test]
     fn create_group() {
-        let group = Group::new("Test Group".to_string(), vec![1, 2, 3]);
+        let group = Group::new("Test Group".to_string(), vec![1, 2, 3], None);
         assert_eq!(group.name, "Test Group");
         assert_eq!(group.symmetric_key, vec![1, 2, 3]);
         assert!(group.members.is_empty());
+        assert!(group.owner.is_none());
+    }
+
+    #[test]
+    fn create_group_with_owner() {
+        let owner = make_peer_id();
+        let group = Group::new("Test Group".to_string(), vec![], Some(owner));
+        assert!(group.is_owner(&owner));
     }
 
     #[test]
     fn group_add_member() {
-        let mut group = Group::new("Test".to_string(), vec![]);
+        let mut group = Group::new("Test".to_string(), vec![], None);
         let peer = make_peer_id();
         group.add_member(peer);
         assert_eq!(group.members.len(), 1);
         assert!(group.is_member(&peer));
+        assert_eq!(group.get_member_role(&peer), Some(MemberRole::Member));
+    }
+
+    #[test]
+    fn group_add_member_with_role() {
+        let mut group = Group::new("Test".to_string(), vec![], None);
+        let peer = make_peer_id();
+        group.add_member_with_role(peer, MemberRole::Admin);
+        assert!(group.is_admin(&peer));
     }
 
     #[test]
     fn group_add_member_idempotent() {
-        let mut group = Group::new("Test".to_string(), vec![]);
+        let mut group = Group::new("Test".to_string(), vec![], None);
         let peer = make_peer_id();
         group.add_member(peer);
         group.add_member(peer);
@@ -382,7 +504,7 @@ mod tests {
 
     #[test]
     fn group_remove_member() {
-        let mut group = Group::new("Test".to_string(), vec![]);
+        let mut group = Group::new("Test".to_string(), vec![], None);
         let peer = make_peer_id();
         group.add_member(peer);
         assert!(group.remove_member(&peer));
@@ -391,9 +513,49 @@ mod tests {
 
     #[test]
     fn group_remove_nonexistent() {
-        let mut group = Group::new("Test".to_string(), vec![]);
+        let mut group = Group::new("Test".to_string(), vec![], None);
         let peer = make_peer_id();
         assert!(!group.remove_member(&peer));
+    }
+
+    #[test]
+    fn group_can_manage() {
+        let owner = make_peer_id();
+        let admin = make_peer_id();
+        let member = make_peer_id();
+        let mut group = Group::new("Test".to_string(), vec![], Some(owner));
+        group.add_member_with_role(admin, MemberRole::Admin);
+        group.add_member(member);
+        
+        assert!(group.can_manage(&owner));
+        assert!(group.can_manage(&admin));
+        assert!(!group.can_manage(&member));
+    }
+
+    #[test]
+    fn group_transfer_ownership() {
+        let owner = make_peer_id();
+        let new_owner = make_peer_id();
+        let mut group = Group::new("Test".to_string(), vec![], Some(owner));
+        group.add_member(new_owner);
+        
+        assert!(group.transfer_ownership(&new_owner));
+        assert!(group.is_owner(&new_owner));
+        assert!(!group.is_owner(&owner));
+    }
+
+    #[test]
+    fn group_settings() {
+        let mut group = Group::new("Test".to_string(), vec![], None);
+        
+        group.set_name("New Name".to_string());
+        assert_eq!(group.name, "New Name");
+        
+        group.set_description(Some("A description".to_string()));
+        assert_eq!(group.description, Some("A description".to_string()));
+        
+        group.set_description(None);
+        assert!(group.description.is_none());
     }
 
     // File transfer tests

@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS contacts (
 CREATE TABLE IF NOT EXISTS groups (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    description TEXT,
+    owner_peer_id TEXT,
     symmetric_key BLOB NOT NULL,
     created_at INTEGER NOT NULL
 );
@@ -27,6 +29,7 @@ CREATE TABLE IF NOT EXISTS groups (
 CREATE TABLE IF NOT EXISTS group_members (
     group_id TEXT NOT NULL,
     peer_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
     PRIMARY KEY (group_id, peer_id)
 );
 

@@ -587,10 +587,10 @@ async fn run_group_tui_with_network(
                         // Send to ALL group members (multicast)
                         {
                             let mut node = node.lock().await;
-                            for member_peer_id in &group.members {
+                            for member in &group.members {
                                 // Don't send to ourselves
-                                if *member_peer_id != from {
-                                    node.send_message(*member_peer_id, encrypted.clone());
+                                if member.peer_id != from {
+                                    node.send_message(member.peer_id, encrypted.clone());
                                 }
                             }
                         }
@@ -933,6 +933,14 @@ pub async fn handle_peers(data_dir: &Path, passphrase: &str) -> Result<()> {
 pub async fn handle_group_create(name: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
     let db = open_database(data_dir, passphrase)?;
 
+    // Load our keypair to get our peer ID (we become the owner)
+    let key_path = keypair_path(data_dir);
+    if !key_path.exists() {
+        anyhow::bail!("No identity found. Run: whisper init");
+    }
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let my_peer_id = keypair_to_peer_id(&keypair);
+
     // Check if group already exists
     if db.get_group_by_name(name)?.is_some() {
         anyhow::bail!("Group '{}' already exists", name);
@@ -941,12 +949,13 @@ pub async fn handle_group_create(name: &str, data_dir: &Path, passphrase: &str) 
     // Generate symmetric key for group
     let symmetric_key = generate_group_key();
 
-    // Create group
-    let group = Group::new(name.to_string(), symmetric_key);
+    // Create group with us as owner
+    let group = Group::new(name.to_string(), symmetric_key, Some(my_peer_id));
     db.create_group(&group)?;
 
     println!("Created group: {}", name);
     println!("Group ID: {}", group.id);
+    println!("You are the owner of this group.");
 
     Ok(())
 }
@@ -1077,7 +1086,252 @@ pub async fn handle_group_list(data_dir: &Path, passphrase: &str) -> Result<()> 
 
     println!("Groups:");
     for group in groups {
-        println!("  {} ({} members)", group.name, group.members.len());
+        let owner_str = if group.owner.is_some() { " [owner]" } else { "" };
+        println!("  {} ({} members){}", group.name, group.members.len(), owner_str);
+        if let Some(desc) = &group.description {
+            println!("    {}", desc);
+        }
+    }
+
+    Ok(())
+}
+
+/// Kick a member from a group (owner/admin only).
+pub async fn handle_group_kick(group_name: &str, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let my_peer_id = keypair_to_peer_id(&keypair);
+
+    // Get group
+    let group = db
+        .get_group_by_name(group_name)?
+        .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", group_name))?;
+
+    // Check permissions
+    if !group.can_manage(&my_peer_id) {
+        anyhow::bail!("You don't have permission to kick members from this group");
+    }
+
+    // Get contact
+    let contact = db
+        .get_contact_by_alias(alias)?
+        .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
+
+    // Can't kick the owner
+    if group.is_owner(&contact.peer_id) {
+        anyhow::bail!("Cannot kick the group owner");
+    }
+
+    // Remove member
+    if db.remove_group_member(&group.id, &contact.peer_id)? {
+        println!("Kicked {} from group '{}'", alias, group_name);
+    } else {
+        println!("{} is not a member of group '{}'", alias, group_name);
+    }
+
+    Ok(())
+}
+
+/// Promote a member to admin (owner only).
+pub async fn handle_group_promote(group_name: &str, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    use crate::message::MemberRole;
+    
+    let db = open_database(data_dir, passphrase)?;
+
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let my_peer_id = keypair_to_peer_id(&keypair);
+
+    // Get group
+    let group = db
+        .get_group_by_name(group_name)?
+        .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", group_name))?;
+
+    // Only owner can promote
+    if !group.is_owner(&my_peer_id) {
+        anyhow::bail!("Only the group owner can promote members to admin");
+    }
+
+    // Get contact
+    let contact = db
+        .get_contact_by_alias(alias)?
+        .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
+
+    // Check if they're a member
+    if !group.is_member(&contact.peer_id) {
+        anyhow::bail!("{} is not a member of group '{}'", alias, group_name);
+    }
+
+    // Promote
+    if db.set_member_role(&group.id, &contact.peer_id, MemberRole::Admin)? {
+        println!("Promoted {} to admin in group '{}'", alias, group_name);
+    } else {
+        anyhow::bail!("Failed to promote {}", alias);
+    }
+
+    Ok(())
+}
+
+/// Demote an admin to member (owner only).
+pub async fn handle_group_demote(group_name: &str, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    use crate::message::MemberRole;
+    
+    let db = open_database(data_dir, passphrase)?;
+
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let my_peer_id = keypair_to_peer_id(&keypair);
+
+    // Get group
+    let group = db
+        .get_group_by_name(group_name)?
+        .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", group_name))?;
+
+    // Only owner can demote
+    if !group.is_owner(&my_peer_id) {
+        anyhow::bail!("Only the group owner can demote admins");
+    }
+
+    // Get contact
+    let contact = db
+        .get_contact_by_alias(alias)?
+        .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
+
+    // Demote
+    if db.set_member_role(&group.id, &contact.peer_id, MemberRole::Member)? {
+        println!("Demoted {} from admin in group '{}'", alias, group_name);
+    } else {
+        anyhow::bail!("{} is not a member of group '{}'", alias, group_name);
+    }
+
+    Ok(())
+}
+
+/// Transfer group ownership (owner only).
+pub async fn handle_group_transfer(group_name: &str, alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let my_peer_id = keypair_to_peer_id(&keypair);
+
+    // Get group
+    let group = db
+        .get_group_by_name(group_name)?
+        .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", group_name))?;
+
+    // Only owner can transfer
+    if !group.is_owner(&my_peer_id) {
+        anyhow::bail!("Only the group owner can transfer ownership");
+    }
+
+    // Get contact
+    let contact = db
+        .get_contact_by_alias(alias)?
+        .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
+
+    // Check if they're a member
+    if !group.is_member(&contact.peer_id) {
+        anyhow::bail!("{} is not a member of group '{}'. Invite them first.", alias, group_name);
+    }
+
+    // Transfer ownership
+    if db.transfer_group_ownership(&group.id, &contact.peer_id)? {
+        println!("Transferred ownership of group '{}' to {}", group_name, alias);
+    } else {
+        anyhow::bail!("Failed to transfer ownership");
+    }
+
+    Ok(())
+}
+
+/// Update group settings (owner/admin only).
+pub async fn handle_group_settings(
+    group_name: &str,
+    new_name: Option<&str>,
+    description: Option<&str>,
+    data_dir: &Path,
+    passphrase: &str,
+) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+
+    // Load our keypair
+    let key_path = keypair_path(data_dir);
+    let keypair = load_keypair(&key_path, passphrase).context("Failed to load keypair")?;
+    let my_peer_id = keypair_to_peer_id(&keypair);
+
+    // Get group
+    let group = db
+        .get_group_by_name(group_name)?
+        .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", group_name))?;
+
+    // Check permissions
+    if !group.can_manage(&my_peer_id) {
+        anyhow::bail!("You don't have permission to modify this group's settings");
+    }
+
+    // Update settings
+    let desc_update = description.map(|d| if d.is_empty() { None } else { Some(d) });
+    
+    if db.update_group_settings(&group.id, new_name, desc_update)? {
+        if let Some(n) = new_name {
+            println!("Updated group name to: {}", n);
+        }
+        if let Some(d) = description {
+            if d.is_empty() {
+                println!("Cleared group description");
+            } else {
+                println!("Updated group description: {}", d);
+            }
+        }
+    } else {
+        println!("No changes made");
+    }
+
+    Ok(())
+}
+
+/// Show group info including members and their roles.
+pub async fn handle_group_info(group_name: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+
+    // Get group
+    let group = db
+        .get_group_by_name(group_name)?
+        .ok_or_else(|| anyhow::anyhow!("Group '{}' not found", group_name))?;
+
+    println!("Group: {}", group.name);
+    println!("ID: {}", group.id);
+    if let Some(desc) = &group.description {
+        println!("Description: {}", desc);
+    }
+    println!("Created: {}", group.created_at);
+    
+    println!("\nMembers ({}):", group.members.len());
+    
+    // Try to resolve member names from contacts
+    for member in &group.members {
+        let is_owner = group.is_owner(&member.peer_id);
+        let alias = db.get_contact(&member.peer_id)?
+            .map(|c| c.alias)
+            .unwrap_or_else(|| member.peer_id.to_string());
+        
+        let role_str = if is_owner {
+            "owner"
+        } else {
+            match member.role {
+                crate::message::MemberRole::Admin => "admin",
+                crate::message::MemberRole::Member => "member",
+            }
+        };
+        
+        println!("  {} [{}]", alias, role_str);
     }
 
     Ok(())

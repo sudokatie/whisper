@@ -120,6 +120,56 @@ pub enum GroupCommands {
 
     /// List all groups
     List,
+
+    /// Show group info and members
+    Info {
+        /// Group name
+        name: String,
+    },
+
+    /// Kick a member from the group (owner/admin only)
+    Kick {
+        /// Group name
+        name: String,
+        /// Contact alias
+        alias: String,
+    },
+
+    /// Promote a member to admin (owner only)
+    Promote {
+        /// Group name
+        name: String,
+        /// Contact alias
+        alias: String,
+    },
+
+    /// Demote an admin to member (owner only)
+    Demote {
+        /// Group name
+        name: String,
+        /// Contact alias
+        alias: String,
+    },
+
+    /// Transfer group ownership (owner only)
+    Transfer {
+        /// Group name
+        name: String,
+        /// New owner's contact alias
+        alias: String,
+    },
+
+    /// Update group settings (owner/admin only)
+    Settings {
+        /// Group name
+        name: String,
+        /// New group name
+        #[arg(long)]
+        rename: Option<String>,
+        /// Group description
+        #[arg(long)]
+        description: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -221,6 +271,24 @@ async fn main() -> Result<()> {
                 }
                 GroupCommands::List => {
                     cli::handle_group_list(&data_dir, &passphrase).await?;
+                }
+                GroupCommands::Info { name } => {
+                    cli::handle_group_info(&name, &data_dir, &passphrase).await?;
+                }
+                GroupCommands::Kick { name, alias } => {
+                    cli::handle_group_kick(&name, &alias, &data_dir, &passphrase).await?;
+                }
+                GroupCommands::Promote { name, alias } => {
+                    cli::handle_group_promote(&name, &alias, &data_dir, &passphrase).await?;
+                }
+                GroupCommands::Demote { name, alias } => {
+                    cli::handle_group_demote(&name, &alias, &data_dir, &passphrase).await?;
+                }
+                GroupCommands::Transfer { name, alias } => {
+                    cli::handle_group_transfer(&name, &alias, &data_dir, &passphrase).await?;
+                }
+                GroupCommands::Settings { name, rename, description } => {
+                    cli::handle_group_settings(&name, rename.as_deref(), description.as_deref(), &data_dir, &passphrase).await?;
                 }
             }
         }

@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::identity::{Contact, TrustLevel};
 use crate::message::{
     FileChunk, FileTransfer, FileTransferStatus,
-    Group, Message, MessageContent, MessageStatus, Recipient,
+    Group, GroupMember, MemberRole, Message, MessageContent, MessageStatus, Recipient,
 };
 
 /// SQLite database wrapper with SQLCipher encryption.
@@ -292,19 +292,21 @@ impl Database {
     /// Create a new group.
     pub fn create_group(&self, group: &Group) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO groups (id, name, symmetric_key, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO groups (id, name, description, owner_peer_id, symmetric_key, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 group.id.to_string(),
                 group.name,
+                group.description,
+                group.owner.map(|p| p.to_string()),
                 group.symmetric_key,
                 group.created_at.timestamp(),
             ],
         )?;
 
-        // Add members
+        // Add members with roles
         for member in &group.members {
-            self.add_group_member(&group.id, member)?;
+            self.add_group_member_with_role(&group.id, &member.peer_id, member.role)?;
         }
 
         Ok(())
@@ -313,29 +315,34 @@ impl Database {
     /// Get a group by ID.
     pub fn get_group(&self, id: &Uuid) -> Result<Option<Group>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, symmetric_key, created_at FROM groups WHERE id = ?1",
+            "SELECT id, name, description, owner_peer_id, symmetric_key, created_at FROM groups WHERE id = ?1",
         )?;
 
         let group_opt = stmt
             .query_row(params![id.to_string()], |row| {
                 let id_str: String = row.get(0)?;
                 let name: String = row.get(1)?;
-                let symmetric_key: Vec<u8> = row.get(2)?;
-                let created_at_ts: i64 = row.get(3)?;
+                let description: Option<String> = row.get(2)?;
+                let owner_str: Option<String> = row.get(3)?;
+                let symmetric_key: Vec<u8> = row.get(4)?;
+                let created_at_ts: i64 = row.get(5)?;
 
-                Ok((id_str, name, symmetric_key, created_at_ts))
+                Ok((id_str, name, description, owner_str, symmetric_key, created_at_ts))
             })
             .optional()?;
 
         match group_opt {
-            Some((id_str, name, symmetric_key, created_at_ts)) => {
+            Some((id_str, name, description, owner_str, symmetric_key, created_at_ts)) => {
                 let id = Uuid::parse_str(&id_str)?;
                 let created_at = Utc.timestamp_opt(created_at_ts, 0).single().unwrap_or_else(Utc::now);
-                let members = self.get_group_members(&id)?;
+                let owner = owner_str.and_then(|s| s.parse().ok());
+                let members = self.get_group_members_with_roles(&id)?;
 
                 Ok(Some(Group {
                     id,
                     name,
+                    description,
+                    owner,
                     members,
                     symmetric_key,
                     created_at,
@@ -367,27 +374,32 @@ impl Database {
     /// List all groups.
     pub fn list_groups(&self) -> Result<Vec<Group>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, symmetric_key, created_at FROM groups ORDER BY name",
+            "SELECT id, name, description, owner_peer_id, symmetric_key, created_at FROM groups ORDER BY name",
         )?;
 
         let rows = stmt.query_map([], |row| {
             let id_str: String = row.get(0)?;
             let name: String = row.get(1)?;
-            let symmetric_key: Vec<u8> = row.get(2)?;
-            let created_at_ts: i64 = row.get(3)?;
-            Ok((id_str, name, symmetric_key, created_at_ts))
+            let description: Option<String> = row.get(2)?;
+            let owner_str: Option<String> = row.get(3)?;
+            let symmetric_key: Vec<u8> = row.get(4)?;
+            let created_at_ts: i64 = row.get(5)?;
+            Ok((id_str, name, description, owner_str, symmetric_key, created_at_ts))
         })?;
 
         let mut groups = Vec::new();
         for row in rows {
-            let (id_str, name, symmetric_key, created_at_ts) = row?;
+            let (id_str, name, description, owner_str, symmetric_key, created_at_ts) = row?;
             let id = Uuid::parse_str(&id_str)?;
             let created_at = Utc.timestamp_opt(created_at_ts, 0).single().unwrap_or_else(Utc::now);
-            let members = self.get_group_members(&id)?;
+            let owner = owner_str.and_then(|s| s.parse().ok());
+            let members = self.get_group_members_with_roles(&id)?;
 
             groups.push(Group {
                 id,
                 name,
+                description,
+                owner,
                 members,
                 symmetric_key,
                 created_at,
@@ -395,6 +407,45 @@ impl Database {
         }
 
         Ok(groups)
+    }
+
+    /// Update group settings (name and description).
+    pub fn update_group_settings(&self, group_id: &Uuid, name: Option<&str>, description: Option<Option<&str>>) -> Result<bool> {
+        let mut updates = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        
+        if let Some(n) = name {
+            updates.push("name = ?");
+            params_vec.push(Box::new(n.to_string()));
+        }
+        if let Some(d) = description {
+            updates.push("description = ?");
+            params_vec.push(Box::new(d.map(|s| s.to_string())));
+        }
+        
+        if updates.is_empty() {
+            return Ok(false);
+        }
+        
+        params_vec.push(Box::new(group_id.to_string()));
+        
+        let sql = format!(
+            "UPDATE groups SET {} WHERE id = ?",
+            updates.join(", ")
+        );
+        
+        let params: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = self.conn.execute(&sql, params.as_slice())?;
+        Ok(rows > 0)
+    }
+
+    /// Transfer group ownership.
+    pub fn transfer_group_ownership(&self, group_id: &Uuid, new_owner: &PeerId) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE groups SET owner_peer_id = ?1 WHERE id = ?2",
+            params![new_owner.to_string(), group_id.to_string()],
+        )?;
+        Ok(rows > 0)
     }
 
     /// Delete a group.
@@ -411,11 +462,16 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Add a member to a group.
+    /// Add a member to a group with default role.
     pub fn add_group_member(&self, group_id: &Uuid, peer_id: &PeerId) -> Result<()> {
+        self.add_group_member_with_role(group_id, peer_id, MemberRole::Member)
+    }
+
+    /// Add a member to a group with a specific role.
+    pub fn add_group_member_with_role(&self, group_id: &Uuid, peer_id: &PeerId, role: MemberRole) -> Result<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO group_members (group_id, peer_id) VALUES (?1, ?2)",
-            params![group_id.to_string(), peer_id.to_string()],
+            "INSERT OR REPLACE INTO group_members (group_id, peer_id, role) VALUES (?1, ?2, ?3)",
+            params![group_id.to_string(), peer_id.to_string(), role.to_string()],
         )?;
         Ok(())
     }
@@ -429,26 +485,59 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Get members of a group.
-    fn get_group_members(&self, group_id: &Uuid) -> Result<Vec<PeerId>> {
+    /// Get a member's role in a group.
+    pub fn get_member_role(&self, group_id: &Uuid, peer_id: &PeerId) -> Result<Option<MemberRole>> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_id FROM group_members WHERE group_id = ?1",
+            "SELECT role FROM group_members WHERE group_id = ?1 AND peer_id = ?2",
+        )?;
+
+        let role_opt: Option<String> = stmt
+            .query_row(params![group_id.to_string(), peer_id.to_string()], |row| row.get(0))
+            .optional()?;
+
+        Ok(role_opt.and_then(|s| s.parse().ok()))
+    }
+
+    /// Set a member's role in a group.
+    pub fn set_member_role(&self, group_id: &Uuid, peer_id: &PeerId, role: MemberRole) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE group_members SET role = ?1 WHERE group_id = ?2 AND peer_id = ?3",
+            params![role.to_string(), group_id.to_string(), peer_id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Get members of a group with their roles.
+    fn get_group_members_with_roles(&self, group_id: &Uuid) -> Result<Vec<GroupMember>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT peer_id, role FROM group_members WHERE group_id = ?1",
         )?;
 
         let rows = stmt.query_map(params![group_id.to_string()], |row| {
             let peer_str: String = row.get(0)?;
-            Ok(peer_str)
+            let role_str: String = row.get(1)?;
+            Ok((peer_str, role_str))
         })?;
 
         let mut members = Vec::new();
         for row in rows {
-            let peer_str = row?;
+            let (peer_str, role_str) = row?;
             if let Ok(peer_id) = peer_str.parse() {
-                members.push(peer_id);
+                let role = role_str.parse().unwrap_or(MemberRole::Member);
+                members.push(GroupMember { peer_id, role });
             }
         }
 
         Ok(members)
+    }
+
+    /// Get members of a group (peer IDs only, for backwards compatibility).
+    #[allow(dead_code)]
+    fn get_group_members(&self, group_id: &Uuid) -> Result<Vec<PeerId>> {
+        Ok(self.get_group_members_with_roles(group_id)?
+            .into_iter()
+            .map(|m| m.peer_id)
+            .collect())
     }
 
     // === Pending Message Queue (Persistent Offline Queue) ===
@@ -992,7 +1081,7 @@ mod tests {
     #[test]
     fn create_and_get_group() {
         let db = Database::open_in_memory().unwrap();
-        let group = Group::new("Test Group".to_string(), vec![1, 2, 3]);
+        let group = Group::new("Test Group".to_string(), vec![1, 2, 3], None);
 
         db.create_group(&group).unwrap();
         let loaded = db.get_group(&group.id).unwrap().unwrap();
@@ -1004,7 +1093,7 @@ mod tests {
     #[test]
     fn get_group_by_name() {
         let db = Database::open_in_memory().unwrap();
-        let group = Group::new("My Group".to_string(), vec![]);
+        let group = Group::new("My Group".to_string(), vec![], None);
 
         db.create_group(&group).unwrap();
         let loaded = db.get_group_by_name("My Group").unwrap();
@@ -1017,8 +1106,8 @@ mod tests {
     fn list_groups() {
         let db = Database::open_in_memory().unwrap();
 
-        db.create_group(&Group::new("Alpha".to_string(), vec![])).unwrap();
-        db.create_group(&Group::new("Beta".to_string(), vec![])).unwrap();
+        db.create_group(&Group::new("Alpha".to_string(), vec![], None)).unwrap();
+        db.create_group(&Group::new("Beta".to_string(), vec![], None)).unwrap();
 
         let groups = db.list_groups().unwrap();
         assert_eq!(groups.len(), 2);
@@ -1027,7 +1116,7 @@ mod tests {
     #[test]
     fn delete_group() {
         let db = Database::open_in_memory().unwrap();
-        let group = Group::new("ToDelete".to_string(), vec![]);
+        let group = Group::new("ToDelete".to_string(), vec![], None);
 
         db.create_group(&group).unwrap();
         assert!(db.delete_group(&group.id).unwrap());
@@ -1037,7 +1126,7 @@ mod tests {
     #[test]
     fn add_group_member() {
         let db = Database::open_in_memory().unwrap();
-        let group = Group::new("Team".to_string(), vec![]);
+        let group = Group::new("Team".to_string(), vec![], None);
         let peer = make_peer_id();
 
         db.create_group(&group).unwrap();
@@ -1045,13 +1134,14 @@ mod tests {
 
         let loaded = db.get_group(&group.id).unwrap().unwrap();
         assert_eq!(loaded.members.len(), 1);
-        assert_eq!(loaded.members[0], peer);
+        assert_eq!(loaded.members[0].peer_id, peer);
+        assert_eq!(loaded.members[0].role, MemberRole::Member);
     }
 
     #[test]
     fn remove_group_member() {
         let db = Database::open_in_memory().unwrap();
-        let mut group = Group::new("Team".to_string(), vec![]);
+        let mut group = Group::new("Team".to_string(), vec![], None);
         let peer = make_peer_id();
         group.add_member(peer);
 
@@ -1065,7 +1155,7 @@ mod tests {
     #[test]
     fn group_members_persist() {
         let db = Database::open_in_memory().unwrap();
-        let mut group = Group::new("Team".to_string(), vec![]);
+        let mut group = Group::new("Team".to_string(), vec![], None);
         let peer1 = make_peer_id();
         let peer2 = make_peer_id();
         group.add_member(peer1);
@@ -1075,6 +1165,74 @@ mod tests {
 
         let loaded = db.get_group(&group.id).unwrap().unwrap();
         assert_eq!(loaded.members.len(), 2);
+    }
+    
+    #[test]
+    fn group_admin_features() {
+        let db = Database::open_in_memory().unwrap();
+        let owner = make_peer_id();
+        let mut group = Group::new("Team".to_string(), vec![], Some(owner));
+        let admin_peer = make_peer_id();
+        let member_peer = make_peer_id();
+        
+        group.add_member(admin_peer);
+        group.add_member(member_peer);
+        db.create_group(&group).unwrap();
+        
+        // Test promote to admin
+        assert!(db.set_member_role(&group.id, &admin_peer, MemberRole::Admin).unwrap());
+        
+        let loaded = db.get_group(&group.id).unwrap().unwrap();
+        assert!(loaded.is_owner(&owner));
+        assert!(loaded.is_admin(&admin_peer));
+        assert!(!loaded.is_admin(&member_peer));
+        assert!(loaded.can_manage(&owner));
+        assert!(loaded.can_manage(&admin_peer));
+        assert!(!loaded.can_manage(&member_peer));
+        
+        // Test demote from admin
+        assert!(db.set_member_role(&group.id, &admin_peer, MemberRole::Member).unwrap());
+        let loaded = db.get_group(&group.id).unwrap().unwrap();
+        assert!(!loaded.is_admin(&admin_peer));
+    }
+    
+    #[test]
+    fn group_ownership_transfer() {
+        let db = Database::open_in_memory().unwrap();
+        let owner = make_peer_id();
+        let new_owner = make_peer_id();
+        let mut group = Group::new("Team".to_string(), vec![], Some(owner));
+        group.add_member(new_owner);
+        db.create_group(&group).unwrap();
+        
+        // Transfer ownership
+        assert!(db.transfer_group_ownership(&group.id, &new_owner).unwrap());
+        
+        let loaded = db.get_group(&group.id).unwrap().unwrap();
+        assert!(loaded.is_owner(&new_owner));
+        assert!(!loaded.is_owner(&owner));
+    }
+    
+    #[test]
+    fn group_settings_update() {
+        let db = Database::open_in_memory().unwrap();
+        let group = Group::new("Team".to_string(), vec![], None);
+        db.create_group(&group).unwrap();
+        
+        // Update name
+        assert!(db.update_group_settings(&group.id, Some("New Team"), None).unwrap());
+        let loaded = db.get_group(&group.id).unwrap().unwrap();
+        assert_eq!(loaded.name, "New Team");
+        
+        // Update description
+        assert!(db.update_group_settings(&group.id, None, Some(Some("Test description"))).unwrap());
+        let loaded = db.get_group(&group.id).unwrap().unwrap();
+        assert_eq!(loaded.description, Some("Test description".to_string()));
+        
+        // Clear description
+        assert!(db.update_group_settings(&group.id, None, Some(None)).unwrap());
+        let loaded = db.get_group(&group.id).unwrap().unwrap();
+        assert!(loaded.description.is_none());
     }
 
     // === Pending Queue Tests ===

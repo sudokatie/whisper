@@ -95,10 +95,16 @@ Messages are stored in SQLite, encrypted at rest using SQLCipher with Argon2 key
 | `block <alias>` | Block contact |
 | `status` | Network status |
 | `peers` | List connected peers |
-| `group create <name>` | Create a group |
+| `group create <name>` | Create a group (you become owner) |
 | `group invite <name> <alias>` | Invite contact to group |
 | `group chat <name>` | Interactive group chat |
 | `group list` | List all groups |
+| `group info <name>` | Show group info and members |
+| `group kick <name> <alias>` | Kick member (owner/admin) |
+| `group promote <name> <alias>` | Promote to admin (owner) |
+| `group demote <name> <alias>` | Demote from admin (owner) |
+| `group transfer <name> <alias>` | Transfer ownership (owner) |
+| `group settings <name> [opts]` | Update name/description |
 | `file send <alias> <path>` | Send a file to a contact |
 | `file list` | List file transfers |
 | `file status <id>` | Show transfer status |
