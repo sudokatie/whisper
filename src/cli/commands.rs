@@ -36,6 +36,43 @@ const FILE_CHUNK_PREFIX: &[u8] = b"FILE:";
 /// Wire message prefix for file transfer completion.
 const FILE_COMPLETE_PREFIX: &[u8] = b"FDNE:";
 
+/// Wire message prefix for reactions.
+const REACTION_PREFIX: &[u8] = b"RXTN:";
+
+/// Parse a wire message to check if it's a reaction.
+/// Returns Some((message_id, emoji, is_remove)) if it's a reaction, None otherwise.
+fn parse_reaction(data: &[u8]) -> Option<(uuid::Uuid, String, bool)> {
+    if !data.starts_with(REACTION_PREFIX) {
+        return None;
+    }
+    let payload = &data[REACTION_PREFIX.len()..];
+    // Format: "A:<uuid>:<emoji>" for add, "R:<uuid>:<emoji>" for remove
+    if payload.len() < 39 {
+        return None;
+    }
+    let is_remove = match payload[0] {
+        b'A' => false,
+        b'R' => true,
+        _ => return None,
+    };
+    if payload[1] != b':' {
+        return None;
+    }
+    let uuid_str = std::str::from_utf8(&payload[2..38]).ok()?;
+    let message_id = uuid::Uuid::parse_str(uuid_str).ok()?;
+    if payload[38] != b':' {
+        return None;
+    }
+    let emoji = std::str::from_utf8(&payload[39..]).ok()?.to_string();
+    Some((message_id, emoji, is_remove))
+}
+
+/// Create a wire reaction message.
+fn create_reaction(message_id: &uuid::Uuid, emoji: &str, remove: bool) -> Vec<u8> {
+    let action = if remove { 'R' } else { 'A' };
+    format!("RXTN:{}:{}:{}", action, message_id, emoji).into_bytes()
+}
+
 /// Parse a wire message to check if it's a receipt.
 /// Returns Some((message_id, receipt_type)) if it's a receipt, None otherwise.
 fn parse_receipt(data: &[u8]) -> Option<(uuid::Uuid, crate::message::ReceiptType)> {
@@ -1994,6 +2031,52 @@ mod tests {
         assert!(parse_receipt(b"RCPT:D:123").is_none());
         // Invalid type
         assert!(parse_receipt(b"RCPT:X:12345678-1234-1234-1234-123456789012").is_none());
+    }
+
+    // Reaction tests
+
+    #[test]
+    fn create_and_parse_reaction_add() {
+        let msg_id = uuid::Uuid::new_v4();
+        let emoji = "👍";
+        
+        let wire = create_reaction(&msg_id, emoji, false);
+        let parsed = parse_reaction(&wire);
+        
+        assert!(parsed.is_some());
+        let (parsed_id, parsed_emoji, is_remove) = parsed.unwrap();
+        assert_eq!(parsed_id, msg_id);
+        assert_eq!(parsed_emoji, emoji);
+        assert!(!is_remove);
+    }
+
+    #[test]
+    fn create_and_parse_reaction_remove() {
+        let msg_id = uuid::Uuid::new_v4();
+        let emoji = "❤️";
+        
+        let wire = create_reaction(&msg_id, emoji, true);
+        let parsed = parse_reaction(&wire);
+        
+        assert!(parsed.is_some());
+        let (_, _, is_remove) = parsed.unwrap();
+        assert!(is_remove);
+    }
+
+    #[test]
+    fn parse_reaction_rejects_non_reactions() {
+        assert!(parse_reaction(b"Hello, world!").is_none());
+        assert!(parse_reaction(b"RCPT:D:12345678-1234-1234-1234-123456789012").is_none());
+    }
+
+    #[test]
+    fn parse_reaction_rejects_malformed() {
+        // Wrong prefix
+        assert!(parse_reaction(b"REACT:A:12345").is_none());
+        // Too short
+        assert!(parse_reaction(b"RXTN:A:123").is_none());
+        // Invalid action
+        assert!(parse_reaction(b"RXTN:X:12345678-1234-1234-1234-123456789012:+").is_none());
     }
 
     // File transfer tests
