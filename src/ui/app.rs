@@ -28,6 +28,8 @@ pub struct DisplayMessage {
     pub timestamp: DateTime<Utc>,
     /// Whether this message is from us.
     pub is_ours: bool,
+    /// Reaction summary: (emoji, count).
+    pub reactions: Vec<(String, usize)>,
 }
 
 impl DisplayMessage {
@@ -38,6 +40,24 @@ impl DisplayMessage {
             content,
             timestamp,
             is_ours,
+            reactions: Vec::new(),
+        }
+    }
+
+    /// Create a display message with reactions.
+    pub fn with_reactions(
+        from: PeerId,
+        content: String,
+        timestamp: DateTime<Utc>,
+        is_ours: bool,
+        reactions: Vec<(String, usize)>,
+    ) -> Self {
+        Self {
+            from,
+            content,
+            timestamp,
+            is_ours,
+            reactions,
         }
     }
 }

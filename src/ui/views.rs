@@ -30,7 +30,7 @@ pub fn render_chat(
     // Render messages
     let message_items: Vec<ListItem> = messages
         .iter()
-        .map(|msg| {
+        .flat_map(|msg| {
             let style = if msg.is_ours {
                 Style::default().fg(Color::Cyan)
             } else {
@@ -40,7 +40,29 @@ pub fn render_chat(
             let time = msg.timestamp.format("%H:%M");
             let prefix = if msg.is_ours { "You" } else { "Them" };
             let text = format!("[{}] {}: {}", time, prefix, msg.content);
-            ListItem::new(Line::from(Span::styled(text, style)))
+            
+            let mut items = vec![ListItem::new(Line::from(Span::styled(text, style)))];
+            
+            // Add reactions line if any
+            if !msg.reactions.is_empty() {
+                let reaction_text: String = msg.reactions
+                    .iter()
+                    .map(|(emoji, count)| {
+                        if *count > 1 {
+                            format!("{} {}", emoji, count)
+                        } else {
+                            emoji.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("       {}", reaction_text),
+                    Style::default().fg(Color::DarkGray),
+                ))));
+            }
+            
+            items
         })
         .collect();
 
