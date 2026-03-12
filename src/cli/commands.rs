@@ -1658,6 +1658,52 @@ pub async fn handle_file_resume(id_str: &str, data_dir: &Path, passphrase: &str)
     Ok(())
 }
 
+/// React to a message with an emoji.
+pub async fn handle_react(message_id_str: &str, emoji: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+    let keypair = load_keypair(&keypair_path(data_dir), passphrase)?;
+    let my_peer_id = keypair_to_peer_id(&keypair);
+
+    let message_id = uuid::Uuid::parse_str(message_id_str)
+        .with_context(|| format!("Invalid message ID: {}", message_id_str))?;
+
+    // Validate emoji (basic check - at least one character)
+    if emoji.is_empty() {
+        anyhow::bail!("Emoji cannot be empty");
+    }
+
+    // Create and save the reaction
+    let reaction = crate::message::Reaction::new(message_id, my_peer_id, emoji.to_string());
+    db.save_reaction(&reaction)?;
+
+    println!("Reacted with {} to message {}", emoji, message_id);
+
+    // TODO: Send reaction to peer (requires network integration)
+    // For now, reactions are stored locally only
+
+    Ok(())
+}
+
+/// Remove a reaction from a message.
+pub async fn handle_unreact(message_id_str: &str, emoji: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+    let keypair = load_keypair(&keypair_path(data_dir), passphrase)?;
+    let my_peer_id = keypair_to_peer_id(&keypair);
+
+    let message_id = uuid::Uuid::parse_str(message_id_str)
+        .with_context(|| format!("Invalid message ID: {}", message_id_str))?;
+
+    if db.delete_reaction(&message_id, &my_peer_id, emoji)? {
+        println!("Removed {} reaction from message {}", emoji, message_id);
+    } else {
+        println!("No {} reaction found on message {}", emoji, message_id);
+    }
+
+    // TODO: Send unreact to peer (requires network integration)
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

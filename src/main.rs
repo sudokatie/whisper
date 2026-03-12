@@ -94,6 +94,22 @@ pub enum Commands {
     /// File transfer commands
     #[command(subcommand)]
     File(FileCommands),
+
+    /// React to a message with an emoji
+    React {
+        /// Message ID to react to
+        message_id: String,
+        /// Emoji reaction (e.g., "👍", "❤️")
+        emoji: String,
+    },
+
+    /// Remove a reaction from a message
+    Unreact {
+        /// Message ID to unreact from
+        message_id: String,
+        /// Emoji to remove
+        emoji: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -310,6 +326,12 @@ async fn main() -> Result<()> {
                     cli::handle_file_resume(&id, &data_dir, &passphrase).await?;
                 }
             }
+        }
+        Commands::React { message_id, emoji } => {
+            cli::handle_react(&message_id, &emoji, &data_dir, &passphrase).await?;
+        }
+        Commands::Unreact { message_id, emoji } => {
+            cli::handle_unreact(&message_id, &emoji, &data_dir, &passphrase).await?;
         }
     }
 
