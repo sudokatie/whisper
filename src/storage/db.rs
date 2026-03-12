@@ -151,6 +151,30 @@ impl Database {
         Ok(messages)
     }
 
+    /// Get a message by ID.
+    pub fn get_message_by_id(&self, id: &Uuid) -> Result<Option<Message>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_peer, to_peer, content, timestamp, status
+             FROM messages WHERE id = ?1",
+        )?;
+
+        let result = stmt.query_row(params![id.to_string()], |row| {
+            Ok(MessageRow {
+                id: row.get(0)?,
+                from_peer: row.get(1)?,
+                to_peer: row.get(2)?,
+                content: row.get(3)?,
+                timestamp: row.get(4)?,
+                status: row.get(5)?,
+            })
+        }).optional()?;
+
+        match result {
+            Some(row) => Ok(Some(self.row_to_message(row)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Update message status.
     pub fn update_message_status(&self, id: &Uuid, status: &MessageStatus) -> Result<bool> {
         let status_str = format!("{:?}", status);
@@ -1116,6 +1140,29 @@ mod tests {
 
         let messages = db.get_messages_with_peer(&them, 10).unwrap();
         assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn get_message_by_id() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+        let msg = Message::new_text(from, Recipient::Direct(to), "test message".to_string());
+
+        db.insert_message(&msg).unwrap();
+        
+        let loaded = db.get_message_by_id(&msg.id).unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.id, msg.id);
+        assert_eq!(loaded.from, from);
+    }
+
+    #[test]
+    fn get_message_by_id_not_found() {
+        let db = Database::open_in_memory().unwrap();
+        let loaded = db.get_message_by_id(&uuid::Uuid::new_v4()).unwrap();
+        assert!(loaded.is_none());
     }
 
     #[test]

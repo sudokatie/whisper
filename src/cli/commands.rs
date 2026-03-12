@@ -464,6 +464,18 @@ async fn run_tui_with_network(
                             continue;
                         }
 
+                        // Check if this is a reaction
+                        if let Some((msg_id, emoji, is_remove)) = parse_reaction(&decrypted) {
+                            if is_remove {
+                                let _ = db.delete_reaction(&msg_id, &from, &emoji);
+                            } else {
+                                let reaction = crate::message::Reaction::new(msg_id, from, emoji);
+                                let _ = db.save_reaction(&reaction);
+                            }
+                            // Don't display reactions as messages
+                            continue;
+                        }
+
                         // Check if this is a file chunk
                         if decrypted.starts_with(FILE_CHUNK_PREFIX) {
                             if let Ok(chunk) = bincode::deserialize::<crate::message::FileChunk>(&decrypted[FILE_CHUNK_PREFIX.len()..]) {
@@ -695,6 +707,17 @@ async fn run_group_tui_with_network(
                                 crate::message::ReceiptType::Read => MessageStatus::Read,
                             };
                             let _ = db.update_message_status(&msg_id, &new_status);
+                            continue;
+                        }
+
+                        // Check if this is a reaction
+                        if let Some((msg_id, emoji, is_remove)) = parse_reaction(&decrypted) {
+                            if is_remove {
+                                let _ = db.delete_reaction(&msg_id, &from, &emoji);
+                            } else {
+                                let reaction = crate::message::Reaction::new(msg_id, from, emoji);
+                                let _ = db.save_reaction(&reaction);
+                            }
                             continue;
                         }
 
@@ -1709,14 +1732,52 @@ pub async fn handle_react(message_id_str: &str, emoji: &str, data_dir: &Path, pa
         anyhow::bail!("Emoji cannot be empty");
     }
 
-    // Create and save the reaction
+    // Create and save the reaction locally
     let reaction = crate::message::Reaction::new(message_id, my_peer_id, emoji.to_string());
     db.save_reaction(&reaction)?;
 
-    println!("Reacted with {} to message {}", emoji, message_id);
+    // Find the message to determine recipient
+    let msg = db.get_message_by_id(&message_id)?
+        .with_context(|| format!("Message not found: {}", message_id))?;
 
-    // TODO: Send reaction to peer (requires network integration)
-    // For now, reactions are stored locally only
+    // Determine who to send the reaction to
+    let target_peer = match &msg.to {
+        Recipient::Direct(peer) => {
+            // If we sent the message, react to the recipient
+            // If they sent it, react to the sender
+            if msg.from == my_peer_id { *peer } else { msg.from }
+        }
+        Recipient::Group(_) => {
+            // For groups, we'd need to multicast - for now just store locally
+            println!("Reacted with {} to message {} (local only for groups)", emoji, message_id);
+            return Ok(());
+        }
+    };
+
+    // Find contact with matching peer_id to get their public key
+    let contacts = db.list_contacts()?;
+    let contact = contacts.iter()
+        .find(|c| c.peer_id == target_peer)
+        .with_context(|| "Recipient contact not found")?;
+
+    if contact.public_key.is_empty() {
+        println!("Reacted with {} to message {} (stored locally, contact has no key)", emoji, message_id);
+        return Ok(());
+    }
+
+    // Create wire message
+    let wire_msg = create_reaction(&message_id, emoji, false);
+    
+    // Encrypt
+    let recipient_pk = ed25519_pk_to_x25519(&contact.public_key)?;
+    let encrypted = encrypt_message(&wire_msg, &recipient_pk)?;
+
+    // Create network node and send
+    let mut node = WhisperNode::new(keypair).await.context("Failed to create network node")?;
+    node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    node.send_message(target_peer, encrypted);
+
+    println!("Reacted with {} to message {}", emoji, message_id);
 
     Ok(())
 }
@@ -1730,13 +1791,51 @@ pub async fn handle_unreact(message_id_str: &str, emoji: &str, data_dir: &Path, 
     let message_id = uuid::Uuid::parse_str(message_id_str)
         .with_context(|| format!("Invalid message ID: {}", message_id_str))?;
 
-    if db.delete_reaction(&message_id, &my_peer_id, emoji)? {
-        println!("Removed {} reaction from message {}", emoji, message_id);
-    } else {
+    if !db.delete_reaction(&message_id, &my_peer_id, emoji)? {
         println!("No {} reaction found on message {}", emoji, message_id);
+        return Ok(());
     }
 
-    // TODO: Send unreact to peer (requires network integration)
+    // Find the message to determine recipient
+    let msg = db.get_message_by_id(&message_id)?
+        .with_context(|| format!("Message not found: {}", message_id))?;
+
+    // Determine who to send the unreact to
+    let target_peer = match &msg.to {
+        Recipient::Direct(peer) => {
+            if msg.from == my_peer_id { *peer } else { msg.from }
+        }
+        Recipient::Group(_) => {
+            println!("Removed {} reaction from message {} (local only for groups)", emoji, message_id);
+            return Ok(());
+        }
+    };
+
+    // Find contact with matching peer_id to get their public key
+    let contacts = db.list_contacts()?;
+    let contact = contacts.iter()
+        .find(|c| c.peer_id == target_peer);
+
+    if let Some(contact) = contact {
+        if !contact.public_key.is_empty() {
+            // Create wire message for removal
+            let wire_msg = create_reaction(&message_id, emoji, true);
+            
+            // Encrypt
+            if let Ok(recipient_pk) = ed25519_pk_to_x25519(&contact.public_key) {
+                if let Ok(encrypted) = encrypt_message(&wire_msg, &recipient_pk) {
+                    // Create network node and send
+                    if let Ok(mut node) = WhisperNode::new(keypair).await {
+                        if node.listen_on("/ip4/0.0.0.0/tcp/0".parse()?).is_ok() {
+                            node.send_message(target_peer, encrypted);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Removed {} reaction from message {}", emoji, message_id);
 
     Ok(())
 }
