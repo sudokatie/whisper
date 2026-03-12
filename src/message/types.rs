@@ -169,6 +169,46 @@ pub enum MessageContent {
     Receipt(Uuid, ReceiptType),
     FileChunk(FileChunk),
     FileComplete(FileTransferComplete),
+    Reaction(ReactionData),
+}
+
+/// A reaction to a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionData {
+    /// ID of the message being reacted to.
+    pub message_id: Uuid,
+    /// The emoji reaction (single emoji).
+    pub emoji: String,
+    /// Whether this is adding or removing the reaction.
+    pub remove: bool,
+}
+
+/// A stored reaction (for database).
+#[derive(Debug, Clone)]
+pub struct Reaction {
+    /// Unique ID of this reaction.
+    pub id: Uuid,
+    /// ID of the message being reacted to.
+    pub message_id: Uuid,
+    /// Peer who sent the reaction.
+    pub from: PeerId,
+    /// The emoji.
+    pub emoji: String,
+    /// When the reaction was created.
+    pub timestamp: DateTime<Utc>,
+}
+
+impl Reaction {
+    /// Create a new reaction.
+    pub fn new(message_id: Uuid, from: PeerId, emoji: String) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            message_id,
+            from,
+            emoji,
+            timestamp: Utc::now(),
+        }
+    }
 }
 
 /// File transfer status.
@@ -405,6 +445,22 @@ impl Message {
             from,
             to,
             content: MessageContent::Receipt(message_id, receipt_type),
+            timestamp: Utc::now(),
+            status: MessageStatus::Pending,
+        }
+    }
+
+    /// Create a reaction message.
+    pub fn new_reaction(from: PeerId, to: Recipient, message_id: Uuid, emoji: String, remove: bool) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            from,
+            to,
+            content: MessageContent::Reaction(ReactionData {
+                message_id,
+                emoji,
+                remove,
+            }),
             timestamp: Utc::now(),
             status: MessageStatus::Pending,
         }
@@ -740,5 +796,56 @@ mod tests {
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].data, data);
+    }
+
+    #[test]
+    fn create_reaction_message() {
+        let from = make_peer_id();
+        let to = make_peer_id();
+        let msg_id = Uuid::new_v4();
+        let msg = Message::new_reaction(from, Recipient::Direct(to), msg_id, "👍".to_string(), false);
+
+        if let MessageContent::Reaction(data) = &msg.content {
+            assert_eq!(data.message_id, msg_id);
+            assert_eq!(data.emoji, "👍");
+            assert!(!data.remove);
+        } else {
+            panic!("Expected Reaction content");
+        }
+    }
+
+    #[test]
+    fn create_reaction_removal() {
+        let from = make_peer_id();
+        let to = make_peer_id();
+        let msg_id = Uuid::new_v4();
+        let msg = Message::new_reaction(from, Recipient::Direct(to), msg_id, "👍".to_string(), true);
+
+        if let MessageContent::Reaction(data) = &msg.content {
+            assert!(data.remove);
+        } else {
+            panic!("Expected Reaction content");
+        }
+    }
+
+    #[test]
+    fn reaction_struct() {
+        let msg_id = Uuid::new_v4();
+        let from = make_peer_id();
+        let reaction = Reaction::new(msg_id, from, "❤️".to_string());
+
+        assert_eq!(reaction.message_id, msg_id);
+        assert_eq!(reaction.from, from);
+        assert_eq!(reaction.emoji, "❤️");
+    }
+
+    #[test]
+    fn reaction_has_unique_id() {
+        let msg_id = Uuid::new_v4();
+        let from = make_peer_id();
+        let r1 = Reaction::new(msg_id, from, "👍".to_string());
+        let r2 = Reaction::new(msg_id, from, "👍".to_string());
+
+        assert_ne!(r1.id, r2.id);
     }
 }

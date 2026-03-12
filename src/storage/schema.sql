@@ -74,3 +74,17 @@ CREATE TABLE IF NOT EXISTS file_chunks (
 CREATE INDEX IF NOT EXISTS idx_file_transfers_status ON file_transfers(status);
 CREATE INDEX IF NOT EXISTS idx_file_transfers_from ON file_transfers(from_peer);
 CREATE INDEX IF NOT EXISTS idx_file_transfers_to ON file_transfers(to_peer);
+
+-- Reactions table
+
+CREATE TABLE IF NOT EXISTS reactions (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    from_peer TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    UNIQUE(message_id, from_peer, emoji)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
+CREATE INDEX IF NOT EXISTS idx_reactions_from ON reactions(from_peer);

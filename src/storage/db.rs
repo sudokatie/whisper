@@ -911,6 +911,93 @@ impl Database {
             file_checksum,
         })
     }
+
+    // === Reaction Operations ===
+
+    /// Save a reaction to a message.
+    pub fn save_reaction(&self, reaction: &crate::message::Reaction) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO reactions (id, message_id, from_peer, emoji, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                reaction.id.to_string(),
+                reaction.message_id.to_string(),
+                reaction.from.to_string(),
+                reaction.emoji,
+                reaction.timestamp.timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get all reactions for a message.
+    pub fn get_reactions_for_message(&self, message_id: &Uuid) -> Result<Vec<crate::message::Reaction>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, message_id, from_peer, emoji, timestamp
+             FROM reactions WHERE message_id = ?1 ORDER BY timestamp ASC",
+        )?;
+
+        let rows = stmt.query_map(params![message_id.to_string()], |row| {
+            Ok(ReactionRow {
+                id: row.get(0)?,
+                message_id: row.get(1)?,
+                from_peer: row.get(2)?,
+                emoji: row.get(3)?,
+                timestamp: row.get(4)?,
+            })
+        })?;
+
+        let mut reactions = Vec::new();
+        for row in rows {
+            let row = row?;
+            if let Ok(reaction) = self.row_to_reaction(row) {
+                reactions.push(reaction);
+            }
+        }
+        Ok(reactions)
+    }
+
+    /// Delete a reaction.
+    pub fn delete_reaction(&self, message_id: &Uuid, from: &PeerId, emoji: &str) -> Result<bool> {
+        let rows = self.conn.execute(
+            "DELETE FROM reactions WHERE message_id = ?1 AND from_peer = ?2 AND emoji = ?3",
+            params![message_id.to_string(), from.to_string(), emoji],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Get reactions grouped by emoji with counts.
+    pub fn get_reaction_summary(&self, message_id: &Uuid) -> Result<Vec<(String, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT emoji, COUNT(*) as count FROM reactions 
+             WHERE message_id = ?1 GROUP BY emoji ORDER BY count DESC",
+        )?;
+
+        let rows = stmt.query_map(params![message_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+
+        let mut summary = Vec::new();
+        for row in rows {
+            summary.push(row?);
+        }
+        Ok(summary)
+    }
+
+    fn row_to_reaction(&self, row: ReactionRow) -> Result<crate::message::Reaction> {
+        let id = Uuid::parse_str(&row.id)?;
+        let message_id = Uuid::parse_str(&row.message_id)?;
+        let from: PeerId = row.from_peer.parse()?;
+        let timestamp = Utc.timestamp_opt(row.timestamp, 0).single().unwrap_or_else(Utc::now);
+
+        Ok(crate::message::Reaction {
+            id,
+            message_id,
+            from,
+            emoji: row.emoji,
+            timestamp,
+        })
+    }
 }
 
 struct MessageRow {
@@ -933,6 +1020,14 @@ struct FileTransferRow {
     status: String,
     created_at: i64,
     file_checksum: Vec<u8>,
+}
+
+struct ReactionRow {
+    id: String,
+    message_id: String,
+    from_peer: String,
+    emoji: String,
+    timestamp: i64,
 }
 
 #[cfg(test)]
@@ -1513,5 +1608,107 @@ mod tests {
 
         // Verify gone
         assert!(db.get_file_transfer(&transfer.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn save_and_get_reaction() {
+        use crate::message::Reaction;
+        
+        let db = Database::open_in_memory().unwrap();
+        let msg_id = Uuid::new_v4();
+        let from = make_peer_id();
+        let reaction = Reaction::new(msg_id, from, "👍".to_string());
+        
+        db.save_reaction(&reaction).unwrap();
+        
+        let reactions = db.get_reactions_for_message(&msg_id).unwrap();
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].emoji, "👍");
+        assert_eq!(reactions[0].from, from);
+    }
+
+    #[test]
+    fn multiple_reactions_on_message() {
+        use crate::message::Reaction;
+        
+        let db = Database::open_in_memory().unwrap();
+        let msg_id = Uuid::new_v4();
+        let peer1 = make_peer_id();
+        let peer2 = make_peer_id();
+        
+        db.save_reaction(&Reaction::new(msg_id, peer1, "👍".to_string())).unwrap();
+        db.save_reaction(&Reaction::new(msg_id, peer2, "👍".to_string())).unwrap();
+        db.save_reaction(&Reaction::new(msg_id, peer1, "❤️".to_string())).unwrap();
+        
+        let reactions = db.get_reactions_for_message(&msg_id).unwrap();
+        assert_eq!(reactions.len(), 3);
+    }
+
+    #[test]
+    fn reaction_summary() {
+        use crate::message::Reaction;
+        
+        let db = Database::open_in_memory().unwrap();
+        let msg_id = Uuid::new_v4();
+        let peer1 = make_peer_id();
+        let peer2 = make_peer_id();
+        let peer3 = make_peer_id();
+        
+        // 2 thumbs up, 1 heart
+        db.save_reaction(&Reaction::new(msg_id, peer1, "👍".to_string())).unwrap();
+        db.save_reaction(&Reaction::new(msg_id, peer2, "👍".to_string())).unwrap();
+        db.save_reaction(&Reaction::new(msg_id, peer3, "❤️".to_string())).unwrap();
+        
+        let summary = db.get_reaction_summary(&msg_id).unwrap();
+        assert_eq!(summary.len(), 2);
+        // Sorted by count desc
+        assert_eq!(summary[0], ("👍".to_string(), 2));
+        assert_eq!(summary[1], ("❤️".to_string(), 1));
+    }
+
+    #[test]
+    fn delete_reaction() {
+        use crate::message::Reaction;
+        
+        let db = Database::open_in_memory().unwrap();
+        let msg_id = Uuid::new_v4();
+        let from = make_peer_id();
+        
+        db.save_reaction(&Reaction::new(msg_id, from, "👍".to_string())).unwrap();
+        
+        // Delete it
+        assert!(db.delete_reaction(&msg_id, &from, "👍").unwrap());
+        
+        let reactions = db.get_reactions_for_message(&msg_id).unwrap();
+        assert_eq!(reactions.len(), 0);
+    }
+
+    #[test]
+    fn delete_nonexistent_reaction() {
+        let db = Database::open_in_memory().unwrap();
+        let msg_id = Uuid::new_v4();
+        let from = make_peer_id();
+        
+        // Should return false for nonexistent
+        assert!(!db.delete_reaction(&msg_id, &from, "👍").unwrap());
+    }
+
+    #[test]
+    fn reaction_replace_same_emoji() {
+        use crate::message::Reaction;
+        
+        let db = Database::open_in_memory().unwrap();
+        let msg_id = Uuid::new_v4();
+        let from = make_peer_id();
+        
+        // Same person, same emoji - should replace (UNIQUE constraint)
+        let r1 = Reaction::new(msg_id, from, "👍".to_string());
+        let r2 = Reaction::new(msg_id, from, "👍".to_string());
+        
+        db.save_reaction(&r1).unwrap();
+        db.save_reaction(&r2).unwrap();
+        
+        let reactions = db.get_reactions_for_message(&msg_id).unwrap();
+        assert_eq!(reactions.len(), 1);
     }
 }
