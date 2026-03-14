@@ -17,6 +17,40 @@ pub enum AppMode {
     Input,
 }
 
+/// Message delivery status for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayStatus {
+    /// Message is being sent.
+    #[default]
+    Pending,
+    /// Message was sent to the network.
+    Sent,
+    /// Message was delivered to recipient.
+    Delivered,
+    /// Message was read by recipient.
+    Read,
+    /// Message send failed.
+    Failed,
+}
+
+impl DisplayStatus {
+    /// Get status indicator character.
+    pub fn indicator(&self) -> &'static str {
+        match self {
+            DisplayStatus::Pending => "...",
+            DisplayStatus::Sent => "✓",
+            DisplayStatus::Delivered => "✓✓",
+            DisplayStatus::Read => "✓✓", // Same as delivered but colored
+            DisplayStatus::Failed => "✗",
+        }
+    }
+    
+    /// Whether this status indicates the message was read.
+    pub fn is_read(&self) -> bool {
+        matches!(self, DisplayStatus::Read)
+    }
+}
+
 /// A message formatted for display.
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
@@ -30,6 +64,8 @@ pub struct DisplayMessage {
     pub is_ours: bool,
     /// Reaction summary: (emoji, count).
     pub reactions: Vec<(String, usize)>,
+    /// Delivery status (only shown for our messages).
+    pub status: DisplayStatus,
 }
 
 impl DisplayMessage {
@@ -41,6 +77,19 @@ impl DisplayMessage {
             timestamp,
             is_ours,
             reactions: Vec::new(),
+            status: DisplayStatus::default(),
+        }
+    }
+    
+    /// Create a display message with status.
+    pub fn with_status(from: PeerId, content: String, timestamp: DateTime<Utc>, is_ours: bool, status: DisplayStatus) -> Self {
+        Self {
+            from,
+            content,
+            timestamp,
+            is_ours,
+            reactions: Vec::new(),
+            status,
         }
     }
 
@@ -58,6 +107,7 @@ impl DisplayMessage {
             timestamp,
             is_ours,
             reactions,
+            status: DisplayStatus::default(),
         }
     }
 }
@@ -290,5 +340,47 @@ mod tests {
         assert_eq!(action, InputAction::Send("test message".to_string()));
         assert!(app.input.is_empty());
         assert_eq!(app.mode, AppMode::Chat);
+    }
+
+    #[test]
+    fn display_status_indicators() {
+        assert_eq!(DisplayStatus::Pending.indicator(), "...");
+        assert_eq!(DisplayStatus::Sent.indicator(), "✓");
+        assert_eq!(DisplayStatus::Delivered.indicator(), "✓✓");
+        assert_eq!(DisplayStatus::Read.indicator(), "✓✓");
+        assert_eq!(DisplayStatus::Failed.indicator(), "✗");
+    }
+
+    #[test]
+    fn display_status_is_read() {
+        assert!(!DisplayStatus::Pending.is_read());
+        assert!(!DisplayStatus::Sent.is_read());
+        assert!(!DisplayStatus::Delivered.is_read());
+        assert!(DisplayStatus::Read.is_read());
+        assert!(!DisplayStatus::Failed.is_read());
+    }
+
+    #[test]
+    fn display_message_with_status() {
+        let peer = libp2p::PeerId::random();
+        let msg = DisplayMessage::with_status(
+            peer,
+            "Hello".to_string(),
+            chrono::Utc::now(),
+            true,
+            DisplayStatus::Delivered,
+        );
+        
+        assert!(msg.is_ours);
+        assert_eq!(msg.status, DisplayStatus::Delivered);
+        assert_eq!(msg.content, "Hello");
+    }
+
+    #[test]
+    fn display_message_default_status() {
+        let peer = libp2p::PeerId::random();
+        let msg = DisplayMessage::new(peer, "Test".to_string(), chrono::Utc::now(), true);
+        
+        assert_eq!(msg.status, DisplayStatus::Pending);
     }
 }

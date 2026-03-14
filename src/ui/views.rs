@@ -39,9 +39,27 @@ pub fn render_chat(
 
             let time = msg.timestamp.format("%H:%M");
             let prefix = if msg.is_ours { "You" } else { "Them" };
-            let text = format!("[{}] {}: {}", time, prefix, msg.content);
             
-            let mut items = vec![ListItem::new(Line::from(Span::styled(text, style)))];
+            // Build message line with status indicator for our messages
+            let mut spans = vec![
+                Span::styled(format!("[{}] ", time), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}: ", prefix), style),
+                Span::styled(msg.content.clone(), style),
+            ];
+            
+            // Add status indicator for our messages
+            if msg.is_ours {
+                let (status_text, status_color) = match msg.status {
+                    super::app::DisplayStatus::Pending => (" ...", Color::DarkGray),
+                    super::app::DisplayStatus::Sent => (" ✓", Color::DarkGray),
+                    super::app::DisplayStatus::Delivered => (" ✓✓", Color::Gray),
+                    super::app::DisplayStatus::Read => (" ✓✓", Color::Blue),
+                    super::app::DisplayStatus::Failed => (" ✗", Color::Red),
+                };
+                spans.push(Span::styled(status_text, Style::default().fg(status_color)));
+            }
+            
+            let mut items = vec![ListItem::new(Line::from(spans))];
             
             // Add reactions line if any
             if !msg.reactions.is_empty() {
