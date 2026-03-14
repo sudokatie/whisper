@@ -798,6 +798,7 @@ pub async fn handle_add_contact(alias: &str, peer_id_str: &str, data_dir: &Path,
         public_key: vec![], // Will be exchanged when connecting
         trust_level: TrustLevel::Unknown,
         last_seen: None,
+        send_read_receipts: true,
     };
 
     // Save to database
@@ -907,6 +908,7 @@ pub async fn handle_import_contact(file: &Path, alias: &str, data_dir: &Path, pa
         public_key: key_bytes,
         trust_level: TrustLevel::Unknown,
         last_seen: None,
+        send_read_receipts: true,
     };
 
     db.upsert_contact(&contact)?;

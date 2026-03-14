@@ -205,6 +205,7 @@ mod tests {
                 public_key: vec![],
                 trust_level: TrustLevel::Trusted,
                 last_seen: None,
+                send_read_receipts: true,
             },
             Contact {
                 peer_id: PeerId::random(),
@@ -212,6 +213,7 @@ mod tests {
                 public_key: vec![],
                 trust_level: TrustLevel::Unknown,
                 last_seen: None,
+                send_read_receipts: true,
             },
         ];
         

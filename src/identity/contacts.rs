@@ -23,6 +23,8 @@ pub struct Contact {
     pub public_key: Vec<u8>,
     pub trust_level: TrustLevel,
     pub last_seen: Option<DateTime<Utc>>,
+    /// Whether to send read receipts to this contact.
+    pub send_read_receipts: bool,
 }
 
 /// Contact storage.
@@ -120,6 +122,7 @@ impl Contact {
             public_key,
             trust_level: TrustLevel::Unknown,
             last_seen: None,
+            send_read_receipts: true,
         }
     }
 }

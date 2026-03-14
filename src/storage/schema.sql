@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     alias TEXT UNIQUE NOT NULL,
     public_key BLOB NOT NULL,
     trust_level TEXT NOT NULL,
-    last_seen INTEGER
+    last_seen INTEGER,
+    send_read_receipts INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS groups (

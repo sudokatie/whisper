@@ -222,14 +222,15 @@ impl Database {
         let last_seen = contact.last_seen.map(|dt| dt.timestamp());
 
         self.conn.execute(
-            "INSERT OR REPLACE INTO contacts (peer_id, alias, public_key, trust_level, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO contacts (peer_id, alias, public_key, trust_level, last_seen, send_read_receipts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 contact.peer_id.to_string(),
                 contact.alias,
                 contact.public_key,
                 trust,
                 last_seen,
+                contact.send_read_receipts as i32,
             ],
         )?;
         Ok(())
@@ -238,7 +239,7 @@ impl Database {
     /// Get a contact by peer ID.
     pub fn get_contact(&self, peer_id: &PeerId) -> Result<Option<Contact>> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_id, alias, public_key, trust_level, last_seen FROM contacts WHERE peer_id = ?1",
+            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts FROM contacts WHERE peer_id = ?1",
         )?;
 
         stmt.query_row(params![peer_id.to_string()], |row| {
@@ -251,7 +252,7 @@ impl Database {
     /// Get a contact by alias.
     pub fn get_contact_by_alias(&self, alias: &str) -> Result<Option<Contact>> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_id, alias, public_key, trust_level, last_seen FROM contacts WHERE alias = ?1",
+            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts FROM contacts WHERE alias = ?1",
         )?;
 
         stmt.query_row(params![alias], |row| self.row_to_contact(row))
@@ -262,7 +263,7 @@ impl Database {
     /// List all contacts.
     pub fn list_contacts(&self) -> Result<Vec<Contact>> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_id, alias, public_key, trust_level, last_seen FROM contacts ORDER BY alias",
+            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts FROM contacts ORDER BY alias",
         )?;
 
         let rows = stmt.query_map([], |row| self.row_to_contact(row))?;
@@ -282,12 +283,34 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Toggle read receipts for a contact.
+    pub fn set_contact_read_receipts(&self, peer_id: &PeerId, enabled: bool) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE contacts SET send_read_receipts = ?1 WHERE peer_id = ?2",
+            params![enabled as i32, peer_id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Check if read receipts should be sent to a contact.
+    pub fn should_send_read_receipts(&self, peer_id: &PeerId) -> Result<bool> {
+        let result: Option<i32> = self.conn.query_row(
+            "SELECT send_read_receipts FROM contacts WHERE peer_id = ?1",
+            params![peer_id.to_string()],
+            |row| row.get(0),
+        ).optional()?;
+        
+        // Default to true if contact not found
+        Ok(result.unwrap_or(1) != 0)
+    }
+
     fn row_to_contact(&self, row: &rusqlite::Row) -> rusqlite::Result<Contact> {
         let peer_id_str: String = row.get(0)?;
         let alias: String = row.get(1)?;
         let public_key: Vec<u8> = row.get(2)?;
         let trust_str: String = row.get(3)?;
         let last_seen_ts: Option<i64> = row.get(4)?;
+        let send_read_receipts: i32 = row.get(5).unwrap_or(1);
 
         let peer_id = peer_id_str
             .parse()
@@ -308,6 +331,7 @@ impl Database {
             public_key,
             trust_level,
             last_seen,
+            send_read_receipts: send_read_receipts != 0,
         })
     }
 
@@ -1757,5 +1781,114 @@ mod tests {
         
         let reactions = db.get_reactions_for_message(&msg_id).unwrap();
         assert_eq!(reactions.len(), 1);
+    }
+
+    // === Read Receipt Tests ===
+
+    #[test]
+    fn contact_read_receipts_default_enabled() {
+        let db = Database::open_in_memory().unwrap();
+        let peer_id = make_peer_id();
+        let contact = Contact::new(peer_id, "alice".to_string(), vec![1, 2, 3]);
+        
+        // Default should be enabled
+        assert!(contact.send_read_receipts);
+        
+        db.upsert_contact(&contact).unwrap();
+        
+        let loaded = db.get_contact(&peer_id).unwrap().unwrap();
+        assert!(loaded.send_read_receipts);
+    }
+
+    #[test]
+    fn set_contact_read_receipts_disabled() {
+        let db = Database::open_in_memory().unwrap();
+        let peer_id = make_peer_id();
+        let contact = Contact::new(peer_id, "alice".to_string(), vec![]);
+        
+        db.upsert_contact(&contact).unwrap();
+        
+        // Disable read receipts
+        assert!(db.set_contact_read_receipts(&peer_id, false).unwrap());
+        
+        let loaded = db.get_contact(&peer_id).unwrap().unwrap();
+        assert!(!loaded.send_read_receipts);
+    }
+
+    #[test]
+    fn set_contact_read_receipts_toggle() {
+        let db = Database::open_in_memory().unwrap();
+        let peer_id = make_peer_id();
+        let contact = Contact::new(peer_id, "bob".to_string(), vec![]);
+        
+        db.upsert_contact(&contact).unwrap();
+        
+        // Disable
+        db.set_contact_read_receipts(&peer_id, false).unwrap();
+        assert!(!db.should_send_read_receipts(&peer_id).unwrap());
+        
+        // Re-enable
+        db.set_contact_read_receipts(&peer_id, true).unwrap();
+        assert!(db.should_send_read_receipts(&peer_id).unwrap());
+    }
+
+    #[test]
+    fn should_send_read_receipts_unknown_contact() {
+        let db = Database::open_in_memory().unwrap();
+        let unknown_peer = make_peer_id();
+        
+        // Unknown contacts should default to true
+        assert!(db.should_send_read_receipts(&unknown_peer).unwrap());
+    }
+
+    #[test]
+    fn set_read_receipts_nonexistent_contact() {
+        let db = Database::open_in_memory().unwrap();
+        let unknown_peer = make_peer_id();
+        
+        // Should return false (no rows updated)
+        assert!(!db.set_contact_read_receipts(&unknown_peer, false).unwrap());
+    }
+
+    #[test]
+    fn contact_read_receipts_persists() {
+        let db = Database::open_in_memory().unwrap();
+        let peer_id = make_peer_id();
+        
+        // Create contact with receipts disabled
+        let mut contact = Contact::new(peer_id, "charlie".to_string(), vec![]);
+        contact.send_read_receipts = false;
+        
+        db.upsert_contact(&contact).unwrap();
+        
+        // Should persist
+        let loaded = db.get_contact(&peer_id).unwrap().unwrap();
+        assert!(!loaded.send_read_receipts);
+    }
+
+    #[test]
+    fn list_contacts_includes_read_receipts() {
+        let db = Database::open_in_memory().unwrap();
+        
+        let p1 = make_peer_id();
+        let p2 = make_peer_id();
+        
+        let mut c1 = Contact::new(p1, "alice".to_string(), vec![]);
+        c1.send_read_receipts = true;
+        
+        let mut c2 = Contact::new(p2, "bob".to_string(), vec![]);
+        c2.send_read_receipts = false;
+        
+        db.upsert_contact(&c1).unwrap();
+        db.upsert_contact(&c2).unwrap();
+        
+        let contacts = db.list_contacts().unwrap();
+        assert_eq!(contacts.len(), 2);
+        
+        let alice = contacts.iter().find(|c| c.alias == "alice").unwrap();
+        let bob = contacts.iter().find(|c| c.alias == "bob").unwrap();
+        
+        assert!(alice.send_read_receipts);
+        assert!(!bob.send_read_receipts);
     }
 }
