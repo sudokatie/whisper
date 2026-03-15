@@ -224,6 +224,7 @@ mod tests {
                 trust_level: TrustLevel::Trusted,
                 last_seen: None,
                 send_read_receipts: true,
+                disappear_after_seconds: None,
             },
             Contact {
                 peer_id: PeerId::random(),
@@ -232,6 +233,7 @@ mod tests {
                 trust_level: TrustLevel::Unknown,
                 last_seen: None,
                 send_read_receipts: true,
+                disappear_after_seconds: None,
             },
         ];
         

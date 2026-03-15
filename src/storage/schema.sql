@@ -6,8 +6,12 @@ CREATE TABLE IF NOT EXISTS messages (
     to_peer TEXT NOT NULL,
     content BLOB NOT NULL,
     timestamp INTEGER NOT NULL,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    expires_at INTEGER
 );
+
+-- Index for efficient expired message cleanup
+CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at) WHERE expires_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS contacts (
     peer_id TEXT PRIMARY KEY,
@@ -15,7 +19,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     public_key BLOB NOT NULL,
     trust_level TEXT NOT NULL,
     last_seen INTEGER,
-    send_read_receipts INTEGER NOT NULL DEFAULT 1
+    send_read_receipts INTEGER NOT NULL DEFAULT 1,
+    disappear_after_seconds INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS groups (

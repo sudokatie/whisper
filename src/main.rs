@@ -110,6 +110,30 @@ pub enum Commands {
         /// Emoji to remove
         emoji: String,
     },
+
+    /// Manage disappearing messages for a contact
+    #[command(subcommand)]
+    Disappear(DisappearCommands),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DisappearCommands {
+    /// Set disappearing message timer for a contact
+    Set {
+        /// Contact alias
+        alias: String,
+        /// Timer duration (e.g., "1h", "24h", "7d", "30s", "off")
+        duration: String,
+    },
+
+    /// Show disappearing message settings for a contact
+    Show {
+        /// Contact alias
+        alias: String,
+    },
+
+    /// Clean up expired messages
+    Cleanup,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -332,6 +356,19 @@ async fn main() -> Result<()> {
         }
         Commands::Unreact { message_id, emoji } => {
             cli::handle_unreact(&message_id, &emoji, &data_dir, &passphrase).await?;
+        }
+        Commands::Disappear(cmd) => {
+            match cmd {
+                DisappearCommands::Set { alias, duration } => {
+                    cli::handle_disappear_set(&alias, &duration, &data_dir, &passphrase).await?;
+                }
+                DisappearCommands::Show { alias } => {
+                    cli::handle_disappear_show(&alias, &data_dir, &passphrase).await?;
+                }
+                DisappearCommands::Cleanup => {
+                    cli::handle_disappear_cleanup(&data_dir, &passphrase).await?;
+                }
+            }
         }
     }
 

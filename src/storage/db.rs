@@ -222,8 +222,8 @@ impl Database {
         let last_seen = contact.last_seen.map(|dt| dt.timestamp());
 
         self.conn.execute(
-            "INSERT OR REPLACE INTO contacts (peer_id, alias, public_key, trust_level, last_seen, send_read_receipts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO contacts (peer_id, alias, public_key, trust_level, last_seen, send_read_receipts, disappear_after_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 contact.peer_id.to_string(),
                 contact.alias,
@@ -231,6 +231,7 @@ impl Database {
                 trust,
                 last_seen,
                 contact.send_read_receipts as i32,
+                contact.disappear_after_seconds.map(|s| s as i64),
             ],
         )?;
         Ok(())
@@ -239,7 +240,7 @@ impl Database {
     /// Get a contact by peer ID.
     pub fn get_contact(&self, peer_id: &PeerId) -> Result<Option<Contact>> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts FROM contacts WHERE peer_id = ?1",
+            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts, disappear_after_seconds FROM contacts WHERE peer_id = ?1",
         )?;
 
         stmt.query_row(params![peer_id.to_string()], |row| {
@@ -252,7 +253,7 @@ impl Database {
     /// Get a contact by alias.
     pub fn get_contact_by_alias(&self, alias: &str) -> Result<Option<Contact>> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts FROM contacts WHERE alias = ?1",
+            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts, disappear_after_seconds FROM contacts WHERE alias = ?1",
         )?;
 
         stmt.query_row(params![alias], |row| self.row_to_contact(row))
@@ -263,7 +264,7 @@ impl Database {
     /// List all contacts.
     pub fn list_contacts(&self) -> Result<Vec<Contact>> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts FROM contacts ORDER BY alias",
+            "SELECT peer_id, alias, public_key, trust_level, last_seen, send_read_receipts, disappear_after_seconds FROM contacts ORDER BY alias",
         )?;
 
         let rows = stmt.query_map([], |row| self.row_to_contact(row))?;
@@ -311,6 +312,7 @@ impl Database {
         let trust_str: String = row.get(3)?;
         let last_seen_ts: Option<i64> = row.get(4)?;
         let send_read_receipts: i32 = row.get(5).unwrap_or(1);
+        let disappear_after: Option<i64> = row.get(6).unwrap_or(None);
 
         let peer_id = peer_id_str
             .parse()
@@ -332,7 +334,80 @@ impl Database {
             trust_level,
             last_seen,
             send_read_receipts: send_read_receipts != 0,
+            disappear_after_seconds: disappear_after.map(|s| s as u32),
         })
+    }
+
+    // === Disappearing Messages ===
+
+    /// Set disappearing messages timer for a contact.
+    /// Pass None to disable disappearing messages.
+    pub fn set_disappearing_timer(&self, peer_id: &PeerId, seconds: Option<u32>) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE contacts SET disappear_after_seconds = ?1 WHERE peer_id = ?2",
+            params![seconds.map(|s| s as i64), peer_id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Get disappearing messages timer for a contact.
+    pub fn get_disappearing_timer(&self, peer_id: &PeerId) -> Result<Option<u32>> {
+        let result: Option<i64> = self.conn.query_row(
+            "SELECT disappear_after_seconds FROM contacts WHERE peer_id = ?1",
+            params![peer_id.to_string()],
+            |row| row.get(0),
+        ).optional()?.flatten();
+        Ok(result.map(|s| s as u32))
+    }
+
+    /// Delete expired messages and return count deleted.
+    pub fn delete_expired_messages(&self) -> Result<usize> {
+        let now = Utc::now().timestamp();
+        let rows = self.conn.execute(
+            "DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+            params![now],
+        )?;
+        Ok(rows)
+    }
+
+    /// Get messages that will expire soon (within next N seconds).
+    pub fn get_expiring_messages(&self, within_seconds: i64) -> Result<Vec<Uuid>> {
+        let deadline = Utc::now().timestamp() + within_seconds;
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+        )?;
+
+        let rows = stmt.query_map(params![deadline], |row| {
+            let id_str: String = row.get(0)?;
+            Ok(id_str)
+        })?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            if let Ok(id) = Uuid::parse_str(&row?) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Set expiration time for a message.
+    pub fn set_message_expiration(&self, id: &Uuid, expires_at: i64) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE messages SET expires_at = ?1 WHERE id = ?2",
+            params![expires_at, id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Get expiration time for a message (if any).
+    pub fn get_message_expiration(&self, id: &Uuid) -> Result<Option<i64>> {
+        let result: Option<i64> = self.conn.query_row(
+            "SELECT expires_at FROM messages WHERE id = ?1",
+            params![id.to_string()],
+            |row| row.get(0),
+        ).optional()?.flatten();
+        Ok(result)
     }
 
     // === Group Operations ===
@@ -1890,5 +1965,157 @@ mod tests {
         
         assert!(alice.send_read_receipts);
         assert!(!bob.send_read_receipts);
+    }
+
+    // === Disappearing Messages Tests ===
+
+    #[test]
+    fn set_disappearing_timer() {
+        let db = Database::open_in_memory().unwrap();
+        let peer_id = make_peer_id();
+        let contact = Contact::new(peer_id, "alice".to_string(), vec![]);
+        
+        db.upsert_contact(&contact).unwrap();
+        
+        // Set timer to 1 hour
+        assert!(db.set_disappearing_timer(&peer_id, Some(3600)).unwrap());
+        
+        // Verify
+        let loaded = db.get_contact(&peer_id).unwrap().unwrap();
+        assert_eq!(loaded.disappear_after_seconds, Some(3600));
+    }
+
+    #[test]
+    fn set_disappearing_timer_disabled() {
+        let db = Database::open_in_memory().unwrap();
+        let peer_id = make_peer_id();
+        let mut contact = Contact::new(peer_id, "bob".to_string(), vec![]);
+        contact.disappear_after_seconds = Some(3600);
+        
+        db.upsert_contact(&contact).unwrap();
+        
+        // Disable
+        assert!(db.set_disappearing_timer(&peer_id, None).unwrap());
+        
+        let loaded = db.get_contact(&peer_id).unwrap().unwrap();
+        assert_eq!(loaded.disappear_after_seconds, None);
+    }
+
+    #[test]
+    fn get_disappearing_timer() {
+        let db = Database::open_in_memory().unwrap();
+        let peer_id = make_peer_id();
+        let mut contact = Contact::new(peer_id, "charlie".to_string(), vec![]);
+        contact.disappear_after_seconds = Some(86400);
+        
+        db.upsert_contact(&contact).unwrap();
+        
+        let timer = db.get_disappearing_timer(&peer_id).unwrap();
+        assert_eq!(timer, Some(86400));
+    }
+
+    #[test]
+    fn get_disappearing_timer_none() {
+        let db = Database::open_in_memory().unwrap();
+        let peer_id = make_peer_id();
+        let contact = Contact::new(peer_id, "dave".to_string(), vec![]);
+        
+        db.upsert_contact(&contact).unwrap();
+        
+        let timer = db.get_disappearing_timer(&peer_id).unwrap();
+        assert_eq!(timer, None);
+    }
+
+    #[test]
+    fn delete_expired_messages() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+        
+        // Create a message
+        let msg = Message::new_text(from, Recipient::Direct(to), "test".to_string());
+        db.insert_message(&msg).unwrap();
+        
+        // Set expiration in the past
+        let past = Utc::now().timestamp() - 100;
+        assert!(db.set_message_expiration(&msg.id, past).unwrap());
+        
+        // Delete expired
+        let deleted = db.delete_expired_messages().unwrap();
+        assert_eq!(deleted, 1);
+        
+        // Verify message is gone
+        assert!(db.get_message_by_id(&msg.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_expired_messages_preserves_valid() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+        
+        // Create two messages
+        let msg1 = Message::new_text(from, Recipient::Direct(to), "expired".to_string());
+        let msg2 = Message::new_text(from, Recipient::Direct(to), "valid".to_string());
+        db.insert_message(&msg1).unwrap();
+        db.insert_message(&msg2).unwrap();
+        
+        // Set msg1 to expire in the past, msg2 in the future
+        let past = Utc::now().timestamp() - 100;
+        let future = Utc::now().timestamp() + 3600;
+        db.set_message_expiration(&msg1.id, past).unwrap();
+        db.set_message_expiration(&msg2.id, future).unwrap();
+        
+        // Delete expired
+        let deleted = db.delete_expired_messages().unwrap();
+        assert_eq!(deleted, 1);
+        
+        // Verify msg1 is gone, msg2 remains
+        assert!(db.get_message_by_id(&msg1.id).unwrap().is_none());
+        assert!(db.get_message_by_id(&msg2.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn get_expiring_messages() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+        
+        let msg = Message::new_text(from, Recipient::Direct(to), "expiring soon".to_string());
+        db.insert_message(&msg).unwrap();
+        
+        // Set to expire in 30 seconds
+        let soon = Utc::now().timestamp() + 30;
+        db.set_message_expiration(&msg.id, soon).unwrap();
+        
+        // Get messages expiring within 60 seconds
+        let expiring = db.get_expiring_messages(60).unwrap();
+        assert_eq!(expiring.len(), 1);
+        assert_eq!(expiring[0], msg.id);
+        
+        // Get messages expiring within 10 seconds (shouldn't include our message)
+        let expiring = db.get_expiring_messages(10).unwrap();
+        assert_eq!(expiring.len(), 0);
+    }
+
+    #[test]
+    fn message_expiration_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+        let from = make_peer_id();
+        let to = make_peer_id();
+        
+        let msg = Message::new_text(from, Recipient::Direct(to), "test".to_string());
+        db.insert_message(&msg).unwrap();
+        
+        // Initially no expiration
+        assert!(db.get_message_expiration(&msg.id).unwrap().is_none());
+        
+        // Set expiration
+        let expires_at = Utc::now().timestamp() + 3600;
+        db.set_message_expiration(&msg.id, expires_at).unwrap();
+        
+        // Verify
+        let loaded = db.get_message_expiration(&msg.id).unwrap();
+        assert_eq!(loaded, Some(expires_at));
     }
 }

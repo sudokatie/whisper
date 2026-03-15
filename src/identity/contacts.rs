@@ -25,6 +25,8 @@ pub struct Contact {
     pub last_seen: Option<DateTime<Utc>>,
     /// Whether to send read receipts to this contact.
     pub send_read_receipts: bool,
+    /// Disappearing messages timer in seconds (None = disabled).
+    pub disappear_after_seconds: Option<u32>,
 }
 
 /// Contact storage.
@@ -123,6 +125,7 @@ impl Contact {
             trust_level: TrustLevel::Unknown,
             last_seen: None,
             send_read_receipts: true,
+            disappear_after_seconds: None,
         }
     }
 }

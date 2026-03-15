@@ -799,6 +799,7 @@ pub async fn handle_add_contact(alias: &str, peer_id_str: &str, data_dir: &Path,
         trust_level: TrustLevel::Unknown,
         last_seen: None,
         send_read_receipts: true,
+        disappear_after_seconds: None,
     };
 
     // Save to database
@@ -909,6 +910,7 @@ pub async fn handle_import_contact(file: &Path, alias: &str, data_dir: &Path, pa
         trust_level: TrustLevel::Unknown,
         last_seen: None,
         send_read_receipts: true,
+        disappear_after_seconds: None,
     };
 
     db.upsert_contact(&contact)?;
@@ -2280,6 +2282,201 @@ mod tests {
         let db = open_database(data_dir, "test").unwrap();
         let transfer = db.get_file_transfer(&transfers[0].id).unwrap().unwrap();
         assert_eq!(transfer.status, FileTransferStatus::Cancelled);
+    }
+}
+
+// === Disappearing Messages ===
+
+/// Parse a duration string like "1h", "24h", "7d", "30s", "off".
+fn parse_disappear_duration(s: &str) -> Result<Option<u32>> {
+    let s = s.trim().to_lowercase();
+    
+    if s == "off" || s == "disable" || s == "disabled" || s == "0" {
+        return Ok(None);
+    }
+    
+    let len = s.len();
+    if len < 2 {
+        anyhow::bail!("Invalid duration format. Use: 30s, 5m, 1h, 24h, 7d, or 'off'");
+    }
+    
+    let unit = &s[len - 1..];
+    let value: u32 = s[..len - 1]
+        .parse()
+        .context("Invalid duration number")?;
+    
+    let seconds = match unit {
+        "s" => value,
+        "m" => value * 60,
+        "h" => value * 3600,
+        "d" => value * 86400,
+        "w" => value * 604800,
+        _ => anyhow::bail!("Invalid duration unit. Use: s (seconds), m (minutes), h (hours), d (days), w (weeks)"),
+    };
+    
+    Ok(Some(seconds))
+}
+
+/// Format seconds as human-readable duration.
+fn format_duration(seconds: u32) -> String {
+    if seconds >= 604800 && seconds % 604800 == 0 {
+        format!("{} week(s)", seconds / 604800)
+    } else if seconds >= 86400 && seconds % 86400 == 0 {
+        format!("{} day(s)", seconds / 86400)
+    } else if seconds >= 3600 && seconds % 3600 == 0 {
+        format!("{} hour(s)", seconds / 3600)
+    } else if seconds >= 60 && seconds % 60 == 0 {
+        format!("{} minute(s)", seconds / 60)
+    } else {
+        format!("{} second(s)", seconds)
+    }
+}
+
+/// Set disappearing message timer for a contact.
+pub async fn handle_disappear_set(alias: &str, duration: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+    
+    // Look up contact
+    let contact = db
+        .get_contact_by_alias(alias)?
+        .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
+    
+    // Parse duration
+    let seconds = parse_disappear_duration(duration)?;
+    
+    // Update contact
+    if db.set_disappearing_timer(&contact.peer_id, seconds)? {
+        match seconds {
+            Some(s) => println!("Disappearing messages enabled for '{}': messages will expire after {}", alias, format_duration(s)),
+            None => println!("Disappearing messages disabled for '{}'", alias),
+        }
+    } else {
+        anyhow::bail!("Failed to update disappearing messages setting");
+    }
+    
+    Ok(())
+}
+
+/// Show disappearing message settings for a contact.
+pub async fn handle_disappear_show(alias: &str, data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+    
+    // Look up contact
+    let contact = db
+        .get_contact_by_alias(alias)?
+        .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
+    
+    match contact.disappear_after_seconds {
+        Some(s) => println!("Disappearing messages for '{}': {} (expires after {})", alias, "enabled", format_duration(s)),
+        None => println!("Disappearing messages for '{}': disabled", alias),
+    }
+    
+    Ok(())
+}
+
+/// Clean up expired messages.
+pub async fn handle_disappear_cleanup(data_dir: &Path, passphrase: &str) -> Result<()> {
+    let db = open_database(data_dir, passphrase)?;
+    
+    let deleted = db.delete_expired_messages()?;
+    
+    if deleted > 0 {
+        println!("Deleted {} expired message(s)", deleted);
+    } else {
+        println!("No expired messages to delete");
+    }
+    
+    Ok(())
+}
+
+#[cfg(test)]
+mod disappear_tests {
+    use super::*;
+    use tempfile::TempDir;
+    
+    #[test]
+    fn parse_duration_seconds() {
+        assert_eq!(parse_disappear_duration("30s").unwrap(), Some(30));
+        assert_eq!(parse_disappear_duration("60s").unwrap(), Some(60));
+    }
+    
+    #[test]
+    fn parse_duration_minutes() {
+        assert_eq!(parse_disappear_duration("5m").unwrap(), Some(300));
+        assert_eq!(parse_disappear_duration("1m").unwrap(), Some(60));
+    }
+    
+    #[test]
+    fn parse_duration_hours() {
+        assert_eq!(parse_disappear_duration("1h").unwrap(), Some(3600));
+        assert_eq!(parse_disappear_duration("24h").unwrap(), Some(86400));
+    }
+    
+    #[test]
+    fn parse_duration_days() {
+        assert_eq!(parse_disappear_duration("1d").unwrap(), Some(86400));
+        assert_eq!(parse_disappear_duration("7d").unwrap(), Some(604800));
+    }
+    
+    #[test]
+    fn parse_duration_weeks() {
+        assert_eq!(parse_disappear_duration("1w").unwrap(), Some(604800));
+        assert_eq!(parse_disappear_duration("2w").unwrap(), Some(1209600));
+    }
+    
+    #[test]
+    fn parse_duration_off() {
+        assert_eq!(parse_disappear_duration("off").unwrap(), None);
+        assert_eq!(parse_disappear_duration("disable").unwrap(), None);
+        assert_eq!(parse_disappear_duration("0").unwrap(), None);
+    }
+    
+    #[test]
+    fn format_duration_values() {
+        assert_eq!(format_duration(30), "30 second(s)");
+        assert_eq!(format_duration(60), "1 minute(s)");
+        assert_eq!(format_duration(3600), "1 hour(s)");
+        assert_eq!(format_duration(86400), "1 day(s)");
+        assert_eq!(format_duration(604800), "1 week(s)");
+    }
+    
+    #[tokio::test]
+    async fn disappear_set_and_show() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+        
+        handle_init(data_dir, "test").await.unwrap();
+        
+        // Add a contact
+        let peer_id = PeerId::random();
+        handle_add_contact("alice", &peer_id.to_string(), data_dir, "test")
+            .await
+            .unwrap();
+        
+        // Set disappearing messages
+        handle_disappear_set("alice", "1h", data_dir, "test").await.unwrap();
+        
+        // Verify it's set
+        let db = open_database(data_dir, "test").unwrap();
+        let contact = db.get_contact_by_alias("alice").unwrap().unwrap();
+        assert_eq!(contact.disappear_after_seconds, Some(3600));
+        
+        // Disable it
+        handle_disappear_set("alice", "off", data_dir, "test").await.unwrap();
+        
+        let contact = db.get_contact_by_alias("alice").unwrap().unwrap();
+        assert_eq!(contact.disappear_after_seconds, None);
+    }
+    
+    #[tokio::test]
+    async fn disappear_cleanup() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path();
+        
+        handle_init(data_dir, "test").await.unwrap();
+        
+        // Run cleanup (should succeed even with no messages)
+        handle_disappear_cleanup(data_dir, "test").await.unwrap();
     }
 
     #[tokio::test]
