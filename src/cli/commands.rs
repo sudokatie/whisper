@@ -2367,7 +2367,7 @@ pub async fn handle_disappear_show(alias: &str, data_dir: &Path, passphrase: &st
         .ok_or_else(|| anyhow::anyhow!("Contact '{}' not found", alias))?;
     
     match contact.disappear_after_seconds {
-        Some(s) => println!("Disappearing messages for '{}': {} (expires after {})", alias, "enabled", format_duration(s)),
+        Some(s) => println!("Disappearing messages for '{}': enabled (expires after {})", alias, format_duration(s)),
         None => println!("Disappearing messages for '{}': disabled", alias),
     }
     
