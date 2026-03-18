@@ -1,47 +1,77 @@
 //! Voice message CLI commands.
 
 use anyhow::{anyhow, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use crate::voice::{AudioCodec, VoiceConfig, VoiceMessage};
+use crate::voice::{
+    AudioCodec, VoiceConfig, VoiceMessage,
+    has_input_device, has_output_device,
+    record_voice_message, play_audio,
+};
 
 /// Check if voice recording is available on this system.
 pub fn is_recording_available() -> bool {
-    // TODO: Check for audio input device via cpal
-    // For now, return false as audio crates aren't integrated yet
-    false
+    has_input_device()
 }
 
 /// Check if voice playback is available on this system.
 pub fn is_playback_available() -> bool {
-    // TODO: Check for audio output device via rodio/cpal
-    // For now, return false as audio crates aren't integrated yet
-    false
+    has_output_device()
 }
 
 /// Record a voice message.
 /// 
 /// Returns the recorded audio data and metadata.
-pub fn record_voice(_config: &VoiceConfig, _max_seconds: u32) -> Result<(VoiceMessage, Vec<u8>)> {
-    // TODO: Implement actual recording with cpal
-    Err(anyhow!("Voice recording not yet implemented. Requires cpal crate integration."))
+pub fn record_voice(config: &VoiceConfig, _max_seconds: u32) -> Result<(VoiceMessage, Vec<u8>)> {
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    
+    // Set up ctrl+c handler to stop recording
+    let stop_clone = Arc::clone(&stop_signal);
+    ctrlc_once(move || {
+        stop_clone.store(true, Ordering::Relaxed);
+    });
+    
+    println!("Recording... Press Ctrl+C to stop.");
+    record_voice_message(config, stop_signal)
 }
 
 /// Play a voice message.
-pub fn play_voice(_audio_data: &[u8], _codec: AudioCodec) -> Result<()> {
-    // TODO: Implement playback with rodio
-    Err(anyhow!("Voice playback not yet implemented. Requires rodio crate integration."))
+pub fn play_voice(audio_data: &[u8], codec: AudioCodec) -> Result<()> {
+    play_audio(audio_data, codec)
 }
 
 /// Stop current recording.
 pub fn stop_recording() -> Result<()> {
-    // TODO: Signal recording thread to stop
-    Err(anyhow!("No recording in progress."))
+    // Recording is stopped via the stop_signal in record_voice
+    Err(anyhow!("Use Ctrl+C to stop recording."))
 }
 
 /// Stop current playback.
 pub fn stop_playback() -> Result<()> {
-    // TODO: Signal playback thread to stop
-    Err(anyhow!("No playback in progress."))
+    // Playback is blocking, so this is informational
+    Err(anyhow!("Playback is blocking. Wait for completion."))
+}
+
+/// Set a one-time ctrl+c handler.
+fn ctrlc_once<F: FnOnce() + Send + 'static>(handler: F) {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    static mut HANDLER: Option<Box<dyn FnOnce() + Send>> = None;
+    
+    INIT.call_once(|| {
+        let _ = ctrlc::set_handler(|| {
+            unsafe {
+                if let Some(h) = HANDLER.take() {
+                    h();
+                }
+            }
+        });
+    });
+    
+    unsafe {
+        HANDLER = Some(Box::new(handler));
+    }
 }
 
 /// Get voice recording capabilities info.
@@ -127,23 +157,25 @@ mod tests {
     
     #[test]
     fn test_is_recording_available() {
-        // Should return false until cpal is integrated
-        assert!(!is_recording_available());
+        // Returns true if system has input device, false otherwise
+        // Just verify it doesn't panic
+        let _ = is_recording_available();
     }
     
     #[test]
     fn test_is_playback_available() {
-        // Should return false until rodio is integrated
-        assert!(!is_playback_available());
+        // Returns true if system has output device, false otherwise
+        // Just verify it doesn't panic
+        let _ = is_playback_available();
     }
     
     #[test]
     fn test_get_capabilities() {
         let caps = get_capabilities();
-        assert!(!caps.can_record);
-        assert!(!caps.can_play);
+        // Verify structure, not specific values (device-dependent)
         assert_eq!(caps.max_duration_secs, 120);
         assert!(!caps.supported_codecs.is_empty());
+        assert!(caps.supported_codecs.contains(&crate::voice::AudioCodec::Opus));
     }
     
     #[test]
@@ -157,12 +189,6 @@ mod tests {
     fn test_handle_voice_help() {
         let result = handle_voice(&["help"]);
         assert!(result.is_ok());
-    }
-    
-    #[test]
-    fn test_handle_voice_record_unavailable() {
-        let result = handle_voice(&["record"]);
-        assert!(result.is_err());
     }
     
     #[test]
