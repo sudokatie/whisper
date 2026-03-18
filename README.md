@@ -19,7 +19,7 @@ Whisper doesn't work that way. Your messages travel directly between you and you
 - **Persistent offline queue**: Messages survive restarts and deliver when contacts come online.
 - **Automatic key distribution**: Group keys are encrypted and sent to invited members.
 - **File transfer**: Send files of any size with chunking and integrity verification.
-- **Voice messages**: Record and send audio messages (coming soon).
+- **Voice messages**: Record and send audio messages with waveform visualization.
 - **Terminal UI**: Clean, fast interface that works anywhere.
 
 ## Installation
@@ -81,6 +81,14 @@ Group messages use XChaCha20-Poly1305 with a shared symmetric key distributed to
 ### Storage
 Messages are stored in SQLite, encrypted at rest using SQLCipher with Argon2 key derivation. Your passphrase derives a secure encryption key - database encryption is always enabled.
 
+### Voice Messages
+Voice messages are recorded using your system's default audio input device and encoded as WAV (16-bit PCM). Recordings include waveform data for visualization. Opus codec support is planned for smaller file sizes.
+
+Requirements:
+- macOS: CoreAudio (built-in)
+- Linux: ALSA or PulseAudio
+- Windows: WASAPI (built-in)
+
 ## Commands
 
 | Command | Description |
@@ -110,6 +118,9 @@ Messages are stored in SQLite, encrypted at rest using SQLCipher with Argon2 key
 | `file list` | List file transfers |
 | `file status <id>` | Show transfer status |
 | `file cancel <id>` | Cancel a transfer |
+| `voice status` | Show voice recording capabilities |
+| `voice record` | Record a voice message (Ctrl+C to stop) |
+| `voice play <id>` | Play a voice message |
 
 ### Options
 
@@ -144,6 +155,8 @@ whisper/
 - **rusqlite**: SQLite database
 - **ratatui**: Terminal UI
 - **tokio**: Async runtime
+- **cpal**: Cross-platform audio input
+- **rodio**: Audio playback
 
 ## Development
 
