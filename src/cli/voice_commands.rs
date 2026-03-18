@@ -54,6 +54,7 @@ pub fn stop_playback() -> Result<()> {
 }
 
 /// Set a one-time ctrl+c handler.
+#[allow(static_mut_refs)]
 fn ctrlc_once<F: FnOnce() + Send + 'static>(handler: F) {
     use std::sync::Once;
     static INIT: Once = Once::new();
@@ -61,6 +62,7 @@ fn ctrlc_once<F: FnOnce() + Send + 'static>(handler: F) {
     
     INIT.call_once(|| {
         let _ = ctrlc::set_handler(|| {
+            // SAFETY: This is only called from the signal handler which is single-threaded
             unsafe {
                 if let Some(h) = HANDLER.take() {
                     h();
@@ -69,6 +71,7 @@ fn ctrlc_once<F: FnOnce() + Send + 'static>(handler: F) {
         });
     });
     
+    // SAFETY: Protected by INIT.call_once - handler only set once
     unsafe {
         HANDLER = Some(Box::new(handler));
     }

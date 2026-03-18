@@ -185,7 +185,7 @@ pub fn calculate_waveform(samples: &[i16], num_points: usize) -> Vec<u8> {
     let chunk_size = samples.len() / num_points;
     if chunk_size == 0 {
         return samples.iter()
-            .map(|&s| ((s.abs() as u32 * 255) / 32768) as u8)
+            .map(|&s| ((s.unsigned_abs() as u32 * 255) / 32768) as u8)
             .collect();
     }
     
@@ -193,7 +193,7 @@ pub fn calculate_waveform(samples: &[i16], num_points: usize) -> Vec<u8> {
         .chunks(chunk_size)
         .take(num_points)
         .map(|chunk| {
-            let max = chunk.iter().map(|&s| s.abs() as u32).max().unwrap_or(0);
+            let max = chunk.iter().map(|&s| s.unsigned_abs() as u32).max().unwrap_or(0);
             ((max * 255) / 32768) as u8
         })
         .collect()

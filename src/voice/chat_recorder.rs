@@ -29,6 +29,7 @@ pub enum ChatRecordingState {
 /// Chat voice recorder.
 ///
 /// Manages voice recording in a background thread for use in async chat loops.
+#[allow(clippy::type_complexity)]
 pub struct ChatVoiceRecorder {
     /// Recording configuration.
     config: VoiceConfig,
