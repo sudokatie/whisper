@@ -9,6 +9,7 @@ pub mod message;
 pub mod network;
 pub mod storage;
 pub mod ui;
+pub mod voice;
 
 // Re-export commonly used types
 pub use identity::{Contact, ContactStore, TrustLevel};
