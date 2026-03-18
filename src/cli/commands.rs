@@ -113,9 +113,10 @@ use crate::message::{Group, Message, MessageContent, MessageStatus, Recipient};
 use crate::network::{NodeEvent, WhisperNode};
 use crate::storage::Database;
 use crate::ui::{
-    App, AppMode, DisplayMessage, InputAction,
+    App, AppMode, DisplayMessage, InputAction, VoiceAction,
     render_chat, render_contacts, render_empty, render_status,
 };
+use crate::voice::{ChatVoiceRecorder, VoiceConfig, has_input_device};
 
 /// Default keypair filename.
 pub const KEYPAIR_FILE: &str = "identity.key";
@@ -306,6 +307,10 @@ async fn run_tui_with_network(
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
+
+    // Voice recorder for chat
+    let voice_config = VoiceConfig::default();
+    let mut voice_recorder = ChatVoiceRecorder::new(voice_config);
     let mut terminal = Terminal::new(backend)?;
 
     // Track connected peers for status bar
@@ -406,8 +411,49 @@ async fn run_tui_with_network(
                     }
                     InputAction::Cancel => {}
                     InputAction::None => {}
-                    InputAction::Voice(_) => {
-                        // Voice recording not implemented in direct chat yet
+                    InputAction::Voice(voice_action) => {
+                        match voice_action {
+                            VoiceAction::StartRecording => {
+                                if !has_input_device() {
+                                    // No mic available - could show error in status
+                                } else if let Err(_e) = voice_recorder.start() {
+                                    // Recording failed to start
+                                }
+                                app.voice_recording = voice_recorder.is_recording();
+                            }
+                            VoiceAction::StopRecording => {
+                                voice_recorder.stop();
+                                app.voice_recording = false;
+                                
+                                // If recording ready, send as voice message
+                                if let Some((voice_msg, audio_data)) = voice_recorder.take_audio() {
+                                    if let Some(peer_id) = app.current_chat {
+                                        // Create voice wire message
+                                        let duration_str = voice_msg.duration_str();
+                                        let wire = crate::voice::VoiceWire::new(voice_msg, audio_data);
+                                        
+                                        // Send to peer
+                                        let mut node = node.lock().await;
+                                        node.send_message(peer_id, wire.to_bytes());
+                                        
+                                        // Add to local display
+                                        let from = app.our_peer_id.unwrap_or_else(PeerId::random);
+                                        let display_text = format!("[Voice: {}]", duration_str);
+                                        app.messages.push(DisplayMessage::new(
+                                            from,
+                                            display_text,
+                                            Utc::now(),
+                                            true,
+                                        ));
+                                    }
+                                }
+                            }
+                            VoiceAction::CancelRecording => {
+                                voice_recorder.cancel();
+                                app.voice_recording = false;
+                            }
+                            VoiceAction::None => {}
+                        }
                     }
                 }
 
