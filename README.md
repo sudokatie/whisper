@@ -19,6 +19,7 @@ Whisper doesn't work that way. Your messages travel directly between you and you
 - **Persistent offline queue**: Messages survive restarts and deliver when contacts come online.
 - **Automatic key distribution**: Group keys are encrypted and sent to invited members.
 - **File transfer**: Send files of any size with chunking and integrity verification.
+- **Voice messages**: Record and send audio messages (coming soon).
 - **Terminal UI**: Clean, fast interface that works anywhere.
 
 ## Installation
@@ -129,6 +130,7 @@ whisper/
 │   ├── message/       # Message types, queue, sync
 │   ├── network/       # libp2p behaviour, discovery, relay
 │   ├── storage/       # SQLite database
+│   ├── voice/         # Voice message recording and playback
 │   ├── ui/            # Terminal interface (ratatui)
 │   └── cli/           # Command handlers
 ├── tests/             # Integration tests
