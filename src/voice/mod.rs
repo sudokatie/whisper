@@ -5,9 +5,11 @@
 
 mod types;
 mod db;
+mod wire;
 
 pub use types::*;
 pub use db::*;
+pub use wire::*;
 
 #[cfg(test)]
 mod tests;
