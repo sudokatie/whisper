@@ -5,7 +5,7 @@ mod input;
 mod views;
 mod voice_ui;
 
-pub use app::{App, AppMode, DisplayMessage, DisplayStatus, InputAction};
+pub use app::{App, AppMode, DisplayMessage, DisplayStatus, InputAction, VoiceAction};
 pub use input::{
     handle_chat_mode, handle_contacts_mode, handle_input_mode, ChatAction, ContactAction,
     InputResult,

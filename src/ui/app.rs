@@ -121,6 +121,21 @@ pub enum InputAction {
     Send(String),
     /// Cancel input mode.
     Cancel,
+    /// Voice recording action.
+    Voice(VoiceAction),
+}
+
+/// Voice action result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoiceAction {
+    /// No voice action.
+    None,
+    /// Start recording.
+    StartRecording,
+    /// Stop recording.
+    StopRecording,
+    /// Cancel recording.
+    CancelRecording,
 }
 
 /// TUI application.
@@ -141,6 +156,8 @@ pub struct App {
     pub should_quit: bool,
     /// Our peer ID.
     pub our_peer_id: Option<PeerId>,
+    /// Voice recording active.
+    pub voice_recording: bool,
 }
 
 impl App {
@@ -155,6 +172,7 @@ impl App {
             selected_contact: 0,
             should_quit: false,
             our_peer_id: None,
+            voice_recording: false,
         }
     }
 
@@ -184,7 +202,18 @@ impl App {
             KeyCode::Char('i') => {
                 self.mode = AppMode::Input;
             }
+            KeyCode::Char('v') | KeyCode::Char('V') => {
+                // Toggle voice recording - handled by caller
+                return InputAction::Voice(if self.voice_recording {
+                    VoiceAction::StopRecording
+                } else {
+                    VoiceAction::StartRecording
+                });
+            }
             KeyCode::Esc => {
+                if self.voice_recording {
+                    return InputAction::Voice(VoiceAction::CancelRecording);
+                }
                 self.mode = AppMode::Contacts;
                 self.current_chat = None;
             }

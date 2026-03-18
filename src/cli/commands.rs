@@ -406,6 +406,9 @@ async fn run_tui_with_network(
                     }
                     InputAction::Cancel => {}
                     InputAction::None => {}
+                    InputAction::Voice(_) => {
+                        // Voice recording not implemented in direct chat yet
+                    }
                 }
 
                 if app.should_quit {
@@ -654,6 +657,9 @@ async fn run_group_tui_with_network(
                     }
                     InputAction::Cancel => {}
                     InputAction::None => {}
+                    InputAction::Voice(_) => {
+                        // Voice recording not implemented in group chat yet
+                    }
                 }
 
                 if app.should_quit {
